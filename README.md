@@ -1,4 +1,3 @@
-# Bridging Microservice Boundaries With Apache Kafka and Debezium
+# microservices-lab
 
-A lab for Red Hat Summit 2019.
-Work-in-progress, a previous version can be found at _voxxed-microservices-2018_.
+A lab focused on propagating data between microservices using Apache Kafka, deployed to OpenShift via Strimzi.
