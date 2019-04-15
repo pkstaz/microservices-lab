@@ -74,7 +74,7 @@ $ git push origin module2
 Now change to the VM where you have started OpenShift and start a MySQL instance by running:
 
 [source, sh]
-$ oc new-app --name=mysql debezium/example-mysql:0.8 \
+$ oc new-app --name=mysql debezium/example-mysql:0.9 \
     -e MYSQL_ROOT_PASSWORD=debezium \
     -e MYSQL_USER=mysqluser \
     -e MYSQL_PASSWORD=mysqlpw
@@ -94,7 +94,7 @@ $ oc new-app --name=order-msa debezium/msa-lab-s2i:latest~https://github.com/<yo
     --context-dir=ticket-msa/order \
     -e MYSQL_DATABASE=inventory \
     -e AB_PROMETHEUS_OFF=true \
-    -e KAFKA_SERVICE_HOST=my-cluster-kafka-bootstrap \
+    -e KAFKA_SERVICE_HOST=production-ready-kafka-bootstrap \
     -e KAFKA_SERVICE_PORT=9092 \
     -e JAVA_OPTIONS=-Djava.net.preferIPv4Stack=true \
     -e ORDER_TOPIC_NAME=myorders
@@ -159,7 +159,7 @@ Now you can place "orders" by submitting requests like this to the application's
 
 [source]
 ----
-$ oc exec -c kafka -i my-cluster-kafka-0 -- curl -X POST -s -w "\n" \
+$ oc exec -c kafka -i production-ready-kafka-0 -- curl -X POST -s -w "\n" \
     -H "Accept:application/json" \
     -H "Content-Type:application/json" \
     http://order-msa:8080/rest/orders -d @- <<'EOF'
@@ -191,8 +191,8 @@ Let's take a look at the topic using the console consumer coming with Kafka:
 
 [source,sh]
 ----
-$ oc exec -c zookeeper -it my-cluster-zookeeper-0 -- /opt/kafka/bin/kafka-console-consumer.sh \
-   --bootstrap-server my-cluster-kafka-bootstrap:9092 \
+$ oc exec -c zookeeper -it production-ready-zookeeper-0 -- /opt/kafka/bin/kafka-console-consumer.sh \
+   --bootstrap-server production-ready-kafka-bootstrap:9092 \
    --from-beginning \
    --property print.key=true \
    --topic myorders
@@ -238,7 +238,7 @@ The steps are the same as above, only that we're building the invoice applicatio
 $ oc new-app --name=invoice-msa debezium/msa-lab-s2i:latest~https://github.com/<your fork>/microservices-lab#module2 \
     --context-dir=ticket-msa/invoice \
     -e AB_PROMETHEUS_OFF=true \
-    -e KAFKA_SERVICE_HOST=my-cluster-kafka-bootstrap \
+    -e KAFKA_SERVICE_HOST=production-ready-kafka-bootstrap \
     -e KAFKA_SERVICE_PORT=9092 \
     -e JAVA_OPTIONS=-Djava.net.preferIPv4Stack=true \
     -e ORDER_TOPIC_NAME=myorders
