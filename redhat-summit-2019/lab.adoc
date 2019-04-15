@@ -1,0 +1,20 @@
+= Running Data Streaming Applications With Kafka on OpenShift
+
+In this lab, you’ll learn the practical aspects of developing and running an end-to-end Kafka-based application on OpenShift.
+
+- In the first part, you'll learn how to run Kafka clusters on OpenShift using the http://strimzi.io/[Strimzi Operator], then get practical instruction on how to monitor
+and tune them for performance and resilience.
+
+- In the second part, you'll learn how to deploy Kafka-based applications on OpenShift by building an end-to-end solution
+of multiple microservices communicating through Kafka.
+
+- In the third part, you'll learn how to use change data capture and https://debezium.io[Debezium] to stream database
+changes out of an existing application, and how to run Kafka Connect sinks that write streaming data to external systems.
+
+include::basics.adoc[]
+
+include::module-01.adoc[]
+
+include::module-02.adoc[]
+
+include::module-03.adoc[]

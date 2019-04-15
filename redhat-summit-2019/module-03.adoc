@@ -1,0 +1,945 @@
+== Change Data Capture with Kafka Connect and Debezium
+:imagesdir: ./images
+
+This part of the lab introduces you to change data capture (CDC) using http://debezium.io/[Debezium].
+Debezium allows you to capture data changes from MySQL, PostgreSQL, MongoDB, Oracle and SQL Server and stream those events into Apache Kafka.
+It is based on https://kafka.apache.org/documentation/#connect[Kafka Connect].
+Streaming data changes from your database enables many interesting use cases such as
+
+* Replicating data across databases by different vendors
+* Synchronizing data between microservices
+* Updating fulltext search indexes (e.g. Elasticsearch) or caches (e.g. https://www.redhat.com/en/technologies/jboss-middleware/data-grid[JBoss Data Grid])
+* Running stream queries such as sliding averages of the value of incoming orders etc.
+
+In this module of the lab you'll learn the following things:
+
+* Setting up Kafka Connect with the Debezium CDC connector for MySQL
+* Configuring an instance of that connector, ingesting changes from an existing example CRUD application
+* Different ways of processing change data events
+** Streaming data changes to a PostgreSQL sink database
+** Streaming data changes to an Elasticsearch index
+** Streaming aggregate events to an Elasticsearch index
+
+The overall architecture of this lab module looks like this:
+
+image::debezium-demo.png[Module 3 Architecture Overview]
+
+=== Setting Up the Example Application
+
+We've prepared a small https://github.com/debezium/microservices-lab/tree/master/eventr[CRUD microservice for managing orders of events], which we'll use in the following as source of data change events.
+It is based on https://thorntail.io/[Thorntail], an approach for building microservices using Java EE and MicroProfile, and uses MySQL as its database.
+
+Start a MySQL instance by running:
+
+[source, sh]
+$ oc new-app --name=mysql debezium/example-mysql:0.8 \
+    -e MYSQL_ROOT_PASSWORD=debezium \
+    -e MYSQL_USER=mysqluser \
+    -e MYSQL_PASSWORD=mysqlpw
+
+On your host machine, check out a new branch for this module of the workshop and push it to your fork on GitHub:
+
+[source, sh]
+----
+# In microservices-lab
+git checkout -b module3 upstream/module3-start
+git push origin module3
+----
+
+Then, in the VM running OpenShift, build and start the application.
+Again we're using the source-to-image process for that:
+
+[source,sh]
+----
+$ oc new-app --name=eventrapp debezium/msa-lab-s2i:latest~https://github.com/<your fork>/microservices-lab#module3 \
+    --context-dir=eventr \
+    -e AB_PROMETHEUS_OFF=true \
+    -e JAVA_OPTIONS=-Djava.net.preferIPv4Stack=true
+----
+
+We still need to expose port 8080 for the application and set up a route for it
+(as that's not done automatically by the S2I builder image).
+To do so, use `oc patch` and expose a route for the service like so:
+
+[source,sh]
+----
+$ oc patch service eventrapp -p '{ "spec" : { "ports" : [{ "name" : "8080-tcp", "port" : 8080, "protocol" : "TCP", "targetPort" : 8080 }] } } }'
+
+$ oc expose svc eventrapp
+----
+
+Verify that the pods of the database and the application are running:
+
+[source,sh]
+----
+$ oc get pods
+----
+
+Once the build has completed, you should see the following status
+(the build job must be "Completed", the actual application and the database "Running"):
+
+[source,sh]
+----
+NAME                                          READY     STATUS    RESTARTS   AGE
+eventrapp-1-build                             0/1       Completed   0          2m
+eventrapp-1-m4rss                             1/1       Running     0          39s
+mysql-2-gk8nw                                 1/1       Running     0          2m
+...
+----
+
+The hostname of the exposed eventrapp service is available in the OpenShift console, or can be retrieved via CLI:
+
+[source]
+$ oc get routes eventrapp -o=jsonpath='{.spec.host}{"\n"}'
+
+Note the output, which should be in the format eventrapp-voxxed.192.168.33.10.nip.io and you can http://eventrapp-voxxed.192.168.33.10.nip.io[navigate there] using a browser.
+Alternatively, you could click on the application's URL within the OpenShift web UI.
+
+You can use "Populate Data" to create some example data (Click on "Search orders" after that to see the created entries).
+Otherwise just insert a few records as you like.
+
+=== Setting Up Kafka Connect With the Debezium Connectors
+
+Now it's time to deploy Kafka Connect and Debezium.
+Kafka Connect is a platform for streaming data between Apache Kafka and other systems.
+It provides a framework and runtime environment for _source connectors_ (for getting data into Kafka)
+and _sink connectors_ (for getting data out of Kafka).
+Debezium provides a set of CDC source connectors for databases such as MySQL, PostgreSQL and MongoDB.
+
+Let's begin by setting up a Kafka Connect cluster,
+using the S2I process provided by Strimzi.
+This makes it very easy to create a Kafka Connect cluster with additional connectors such as the ones provided by Debezium (the operation must be executed as the `admin`):
+
+[source]
+----
+$ oc login -u system:admin
+$ oc process strimzi-connect-s2i \
+    -p CLUSTER_NAME=debezium \
+    -p KAFKA_CONNECT_CONFIG_STORAGE_REPLICATION_FACTOR=1 \
+    -p KAFKA_CONNECT_OFFSET_STORAGE_REPLICATION_FACTOR=1 \
+    -p KAFKA_CONNECT_STATUS_STORAGE_REPLICATION_FACTOR=1 \
+    | oc apply -f -
+$ oc login -u developer
+----
+
+Use `oc status` to verify that the S2I process has finished
+(a deployment of `svc/debezium-connect-api` should be in state "deployed"):
+
+[source]
+----
+$ oc status
+
+In project voxxed on server https://127.0.0.1:8443
+
+svc/debezium-connect-api - 172.30.17.34:8083
+  dc/debezium-connect deploys istag/debezium-connect:latest <-
+    bc/debezium-connect source builds uploaded code on istag/debezium-connect-source:0.8.0
+      not built yet
+    deployment #2 deployed about a minute ago - 1 pod
+    deployment #1 failed 2 minutes ago: newer deployment was found running
+...
+----
+
+Alternatively, you can check in the OpenShift web UI that the rolling deployment for "debezium-connect" has finished.
+
+Then download the following files:
+
+* the Debezium CDC connector for MySQL
+* the Confluent JDBC sink connector and the PostgreSQL database driver
+* the Confluent Elasticsearch sink connector and its dependencies
+
+Extract the downloaded files and trigger another S2I build of `debezium-connect`, this time including these additional resources:
+
+[source,sh]
+----
+export DEBEZIUM_VERSION=0.8.3.Final
+mkdir -p plugins && cd plugins && \
+curl http://central.maven.org/maven2/io/debezium/debezium-connector-mysql/$DEBEZIUM_VERSION/debezium-connector-mysql-$DEBEZIUM_VERSION-plugin.tar.gz | tar xz; \
+mkdir confluent-jdbc-sink && cd confluent-jdbc-sink && \
+curl -O http://central.maven.org/maven2/org/postgresql/postgresql/42.2.2/postgresql-42.2.2.jar && \
+curl -O http://packages.confluent.io/maven/io/confluent/kafka-connect-jdbc/5.0.0/kafka-connect-jdbc-5.0.0.jar && \
+cd .. && \
+mkdir confluent-es-sink && cd confluent-es-sink && \
+curl -sO http://packages.confluent.io/maven/io/confluent/kafka-connect-elasticsearch/5.0.0/kafka-connect-elasticsearch-5.0.0.jar && \
+curl -sO http://central.maven.org/maven2/io/searchbox/jest/2.0.0/jest-2.0.0.jar && \
+curl -sO http://central.maven.org/maven2/org/apache/httpcomponents/httpcore-nio/4.4.4/httpcore-nio-4.4.4.jar && \
+curl -sO http://central.maven.org/maven2/org/apache/httpcomponents/httpclient/4.5.1/httpclient-4.5.1.jar && \
+curl -sO http://central.maven.org/maven2/org/apache/httpcomponents/httpasyncclient/4.1.1/httpasyncclient-4.1.1.jar && \
+curl -sO http://central.maven.org/maven2/org/apache/httpcomponents/httpcore/4.4.4/httpcore-4.4.4.jar && \
+curl -sO http://central.maven.org/maven2/commons-logging/commons-logging/1.2/commons-logging-1.2.jar && \
+curl -sO http://central.maven.org/maven2/commons-codec/commons-codec/1.9/commons-codec-1.9.jar && \
+curl -sO http://central.maven.org/maven2/org/apache/httpcomponents/httpcore/4.4.4/httpcore-4.4.4.jar && \
+curl -sO http://central.maven.org/maven2/io/searchbox/jest-common/2.0.0/jest-common-2.0.0.jar && \
+curl -sO http://central.maven.org/maven2/com/google/code/gson/gson/2.4/gson-2.4.jar && \
+cd .. && \
+oc start-build debezium-connect --from-dir=. --follow && \
+cd ..
+----
+
+You should see an output like this:
+
+[source]
+----
+Uploading directory "." as binary input for the build ...
+build "debezium-connect-2" started
+Receiving source from STDIN as archive ...
+Assembling plugins into custom plugin directory /tmp/kafka-plugins
+Moving plugins to /tmp/kafka-plugins
+Pushing image docker-registry.default.svc:5000/l1099-kafka/debezium-connect:latest ...
+Pushed 6/9 layers, 67% complete
+Pushed 7/9 layers, 78% complete
+Pushed 8/9 layers, 89% complete
+Pushed 9/9 layers, 100% complete
+Push successful
+----
+
+Use `oc get pods` again to verify that Kafka Connect is running:
+
+[source,sh]
+----
+$ oc get pods
+
+NAME                                          READY     STATUS    RESTARTS   AGE
+debezium-connect-3-mpscv                      1/1       Running     0          1m
+...
+----
+
+Once that's the case, register an instance of the Debezium MySQL connector using the REST API of Kafka Connect:
+
+[source]
+----
+$ oc exec -c kafka -i my-cluster-kafka-0 -- curl -s  -w "\n" -X POST \
+    -H "Accept:application/json" \
+    -H "Content-Type:application/json" \
+    http://debezium-connect-api:8083/connectors -d @- <<'EOF'
+
+{
+    "name": "inventory-connector",
+    "config": {
+        "connector.class": "io.debezium.connector.mysql.MySqlConnector",
+        "tasks.max": "1",
+        "database.hostname": "mysql",
+        "database.port": "3306",
+        "database.user": "debezium",
+        "database.password": "dbz",
+        "database.server.id": "184054",
+        "database.server.name": "dbserver1",
+        "database.whitelist": "inventory",
+        "database.history.kafka.bootstrap.servers": "my-cluster-kafka-bootstrap:9092",
+        "database.history.kafka.topic": "schema-changes.inventory",
+        "transforms": "route",
+        "transforms.route.type": "org.apache.kafka.connect.transforms.RegexRouter",
+        "transforms.route.regex": "([^.]+)\\.([^.]+)\\.([^.]+)",
+        "transforms.route.replacement": "$3"
+    }
+}
+EOF
+----
+
+This sets up an instance of Debezium's `io.debezium.connector.mysql.MySqlConnector` class,
+using the given credentials.
+By specifying the `database.whitelist` option (or, on a more fine-grained level, `table.whitelist`), we can narrow down the set of captured tables.
+
+Kafka Connect’s log file should contain messages regarding execution of initial snapshot (look for log messages like "INFO Step 1 ..."):
+
+[source,sh]
+----
+$ oc logs $(oc get pods -o name -l strimzi.io/name=debezium-connect)
+----
+
+You can examine CDC messages in Kafka using the console consumer (use Ctrl + C to exit the tool):
+
+[source]
+----
+$ oc exec -c zookeeper -it my-cluster-zookeeper-0 -- /opt/kafka/bin/kafka-console-consumer.sh \
+   --bootstrap-server my-cluster-kafka-bootstrap:9092 \
+   --from-beginning \
+   --property print.key=true \
+   --topic EventrOrder
+----
+
+At this point you should see messages originating from the initial snapshot performed by the connector.
+
+Note that by default topic names follow the pattern "<db server name>.<db name>.<table name>".
+By means of the `RegexRouter` in the connector configuration we've changed that so that the topic name is just the unqualified table name.
+You should see messages comprising of a key and a value like the following (formatted for the sake readability),
+representing the `Order` records as per the initial snapshot.
+
+Key:
+
+[source]
+----
+{
+    "schema": {
+        "type": "struct",
+        "fields": [
+            {
+                "type": "int32",
+                "optional": false,
+                "field": "id"
+            }
+        ],
+        "optional": false,
+        "name": "dbserver1.inventory.EventrOrder.Key"
+    },
+    "payload": {
+        "id": 4
+    }
+}
+----
+
+Value:
+
+[source]
+----
+{
+    "schema": {
+        "type": "struct",
+        "fields": [
+            {
+                "type": "struct",
+                "fields": [
+                    {
+                        "type": "int32",
+                        "optional": false,
+                        "field": "id"
+                    },
+                    {
+                        "type": "string",
+                        "optional": true,
+                        "field": "customer"
+                    },
+                    {
+                        "type": "int32",
+                        "optional": false,
+                        "name": "io.debezium.time.Date",
+                        "version": 1,
+                        "field": "order_date"
+                    },
+                    {
+                        "type": "bytes",
+                        "optional": false,
+                        "name": "org.apache.kafka.connect.data.Decimal",
+                        "version": 1,
+                        "parameters": {
+                            "scale": "2",
+                            "connect.decimal.precision": "19"
+                        },
+                        "field": "payment"
+                    },
+                    {
+                        "type": "int32",
+                        "optional": false,
+                        "field": "event_id"
+                    }
+                ],
+                "optional": true,
+                "name": "dbserver1.inventory.EventrOrder.Value",
+                "field": "before"
+            },
+            {
+                "type": "struct",
+                "fields": [
+                    {
+                        "type": "int32",
+                        "optional": false,
+                        "field": "id"
+                    },
+                    {
+                        "type": "string",
+                        "optional": true,
+                        "field": "customer"
+                    },
+                    {
+                        "type": "int32",
+                        "optional": false,
+                        "name": "io.debezium.time.Date",
+                        "version": 1,
+                        "field": "order_date"
+                    },
+                    {
+                        "type": "bytes",
+                        "optional": false,
+                        "name": "org.apache.kafka.connect.data.Decimal",
+                        "version": 1,
+                        "parameters": {
+                            "scale": "2",
+                            "connect.decimal.precision": "19"
+                        },
+                        "field": "payment"
+                    },
+                    {
+                        "type": "int32",
+                        "optional": false,
+                        "field": "event_id"
+                    }
+                ],
+                "optional": true,
+                "name": "dbserver1.inventory.EventrOrder.Value",
+                "field": "after"
+            },
+            {
+                "type": "struct",
+                "fields": [
+                    {
+                        "type": "string",
+                        "optional": true,
+                        "field": "version"
+                    },
+                    {
+                        "type": "string",
+                        "optional": false,
+                        "field": "name"
+                    },
+                    {
+                        "type": "int64",
+                        "optional": false,
+                        "field": "server_id"
+                    },
+                    {
+                        "type": "int64",
+                        "optional": false,
+                        "field": "ts_sec"
+                    },
+                    {
+                        "type": "string",
+                        "optional": true,
+                        "field": "gtid"
+                    },
+                    {
+                        "type": "string",
+                        "optional": false,
+                        "field": "file"
+                    },
+                    {
+                        "type": "int64",
+                        "optional": false,
+                        "field": "pos"
+                    },
+                    {
+                        "type": "int32",
+                        "optional": false,
+                        "field": "row"
+                    },
+                    {
+                        "type": "boolean",
+                        "optional": true,
+                        "default": false,
+                        "field": "snapshot"
+                    },
+                    {
+                        "type": "int64",
+                        "optional": true,
+                        "field": "thread"
+                    },
+                    {
+                        "type": "string",
+                        "optional": true,
+                        "field": "db"
+                    },
+                    {
+                        "type": "string",
+                        "optional": true,
+                        "field": "table"
+                    },
+                    {
+                        "type": "string",
+                        "optional": true,
+                        "field": "query"
+                    }
+                ],
+                "optional": false,
+                "name": "io.debezium.connector.mysql.Source",
+                "field": "source"
+            },
+            {
+                "type": "string",
+                "optional": false,
+                "field": "op"
+            },
+            {
+                "type": "int64",
+                "optional": true,
+                "field": "ts_ms"
+            }
+        ],
+        "optional": false,
+        "name": "dbserver1.inventory.EventrOrder.Envelope"
+    },
+    "payload": {
+        "before": null,
+        "after": {
+            "id": 4,
+            "customer": "Bob Smith",
+            "order_date": 17829,
+            "payment": "F28=",
+            "event_id": 1
+        },
+        "source": {
+            "version": "0.8.3.Final",
+            "name": "dbserver1",
+            "server_id": 223344,
+            "ts_sec": 1540457930,
+            "gtid": null,
+            "file": "mysql-bin.000003",
+            "pos": 101280,
+            "row": 0,
+            "snapshot": false,
+            "thread": 182,
+            "db": "inventory",
+            "table": "EventrOrder",
+            "query": null
+        },
+        "op": "c",
+        "ts_ms": 1540457964571
+    }
+}
+----
+
+Message key and value use JSON (the binary Avro format could be used alternatively),
+and both contain a payload as well as a schema describing the structure of the payload.
+
+The key's payload resembles the primary key of the represented record.
+The value's payload contains information of
+
+* the old state of the changed row (`before`, which is null in the case of an insert or record created during snapshotting)
+* the new state of the changed row (`after`)
+* metadata such as the table and database name, a timestamp etc.
+
+If you now use the web app to insert, update or delete records while keeping the console consumer running, you'll see how corresponding CDC messages arrive in the topic.
+
+Using the Kafka Connect REST API, you also can query the list of connectors, query the status of a given connector, delete a connector and more:
+
+[source]
+----
+# List all connectors
+$ oc exec -c kafka -i my-cluster-kafka-0 -- curl -w "\n" -s -X GET \
+    -H "Accept:application/json" \
+    -H "Content-Type:application/json" \
+    http://debezium-connect-api:8083/connectors
+----
+
+[source]
+----
+# Get status of "inventory-connector"
+$ oc exec -c kafka -i my-cluster-kafka-0 -- curl -w "\n" -s -X GET \
+    -H "Accept:application/json" \
+    -H "Content-Type:application/json" \
+    http://debezium-connect-api:8083/connectors/inventory-connector/status
+----
+
+[source]
+----
+# Restart "inventory-connector"
+$ oc exec -c kafka -i my-cluster-kafka-0 -- curl -w "\n" -s -X POST \
+    -H "Accept:application/json" \
+    -H "Content-Type:application/json" \
+    http://debezium-connect-api:8083/connectors/inventory-connector/restart
+----
+
+[source]
+----
+# Delete "inventory-connector" (don't run it, as we'll still need the connector in the following)
+$ oc exec -c kafka -i my-cluster-kafka-0 -- curl -w "\n" -s -X DELETE \
+    -H "Accept:application/json" \
+    -H "Content-Type:application/json" \
+    http://debezium-connect-api:8083/connectors/inventory-connector
+----
+
+=== Processing Change Data Events
+
+Examining change events in the Kafka console is a good first step,
+but eventually we'd like to consume the events in a more meaningful way.
+
+In the following different ways for consuming events are explored.
+You can choose the one you are most interested in or walk through all the alternatives,
+as your preference.
+
+==== Streaming Data Changes to a PostgreSQL Sink Database
+
+To stream data changes into another database, no manual programming effort is needed.
+Instead, the Confluent JDBC sink connector for Kafka Connect can be used to data into a target database.
+
+So let's set up another database (PostgreSQL in this case) and stream the data changes there.
+
+[source]
+----
+$ oc new-app \
+    -e POSTGRESQL_USER=postgresuser \
+    -e POSTGRESQL_PASSWORD=postgrespw \
+    -e POSTGRESQL_DATABASE=inventory \
+    centos/postgresql-95-centos7
+----
+
+Once the database has started (use `oc get pods` to verify that PostgreSQL is running), register an instance of the https://docs.confluent.io/current/connect/kafka-connect-jdbc/sink-connector/index.html[Kafka Connect JDBC sink connector].
+This connector can be used to propagate Kafka messages to relational databases via JDBC:
+
+[source]
+----
+$ oc exec -c kafka -i my-cluster-kafka-0 -- curl  -w "\n" -s -X POST \
+    -H "Accept:application/json" \
+    -H "Content-Type:application/json" \
+    http://debezium-connect-api:8083/connectors -d @- <<'EOF'
+{
+    "name": "jdbc-sink",
+    "config": {
+        "connector.class": "io.confluent.connect.jdbc.JdbcSinkConnector",
+        "tasks.max": "1",
+        "topics": "EventrOrder",
+        "connection.url": "jdbc:postgresql://postgresql-95-centos7:5432/inventory?user=postgresuser&password=postgrespw",
+        "transforms": "unwrap",
+        "transforms.unwrap.type": "io.debezium.transforms.UnwrapFromEnvelope",
+        "auto.create": "true",
+        "insert.mode": "upsert",
+        "pk.fields": "id",
+        "pk.mode": "record_value"
+    }
+}
+EOF
+----
+
+This sets up an an instance of `io.confluent.connect.jdbc.JdbcSinkConnector`,
+listening to the `EventrOrder` topic and streaming all data changes to the given database connection.
+As this sink connector just expects the effective state of changed rows
+(i.e. the "after" part from the Debezium data change messages),
+only this part is extracted using Debezium's `UnwrapFromEnvelope` SMT (single message transform).
+
+With the sink connector being set up, we can take a look into the PostgreSQL database and see how the table changes are propgated there.
+Get a shell on the pod of the PostgreSQL service:
+
+[source,sh]
+----
+$ oc rsh $(oc get pods -o name -l app=postgresql-95-centos7)
+----
+
+Run a query to get all records from the table corresponding to the monitored topic:
+
+[source,sh]
+----
+psql -U postgresuser inventory -c 'select * from "EventrOrder"'
+----
+
+As you alter records in the source web application,
+you'll see how the table in PostgreSQL gets updated accordingly, if you re-execute the query.
+Note that `DELETE` operations currently cannot be propagated, as they are not yet supported by the JDBC sink connector.
+Debezium provides a solution for that by allowing deletes to be rewritten into updates of a logical "deleted" field in emitted messages.
+This can then be used to delete all records in the sink database e.g. using a batch job.
+
+To leave the shell on the PostgreSQL pod, run:
+
+[source]
+----
+exit
+----
+
+==== Streaming Change Events To Elasticsearch
+
+The beauty of using Apache Kafka for streaming change events is its flexibility.
+As the topics are persistent, additional consumers can come up which have not been known when data changes originally occurred.
+
+As an example, lets stream the `EvntrOrder` events to Elasticsearch now, too, making them available to the powerful fulltext search capabilities.
+
+Set up a single Elasticsearch node
+(it'd be a complete cluster in production, but a single node is fine for the purposes of this lab)
+and expose it as a service:
+
+[source]
+----
+$ oc new-app -e ES_JAVA_OPTS="-Xms512m -Xmx512m" elasticsearch:6.4.2
+$ oc expose svc/elasticsearch
+----
+
+Create a configuration file for Elasticsearch:
+
+[source]
+----
+$ cat > elasticsearch.yml << EOF
+cluster.name: docker-cluster123
+network.host: 0.0.0.0
+discovery.zen.minimum_master_nodes: 1
+discovery.type: single-node
+EOF
+----
+
+And make its contents available as a config map:
+
+[source]
+----
+$ oc create configmap es-config --from-file=elasticsearch.yml
+----
+
+Finally, the config map contents can be exposed to the Elasticsearch container using a volume:
+
+[source]
+----
+$ oc set volumes dc/elasticsearch --overwrite --add \
+  -t configmap \
+  -m /usr/share/elasticsearch/config/elasticsearch.yml \
+  --sub-path=elasticsearch.yml \
+  --name=es-config \
+  --configmap-name=es-config
+----
+
+This triggers a restart of the Elasticsearch node; once it's up again (use `oc get pods` to verify),
+it's time to register an instance of the Elasticsearch sink connector:
+
+[source]
+----
+$ oc exec -c kafka -i my-cluster-kafka-0 -- curl -X POST -s -w "\n" \
+    -H "Accept:application/json" \
+    -H "Content-Type:application/json" \
+    http://debezium-connect-api:8083/connectors -d @- <<'EOF'
+{
+    "name": "elastic-sink",
+    "config": {
+        "connector.class": "io.confluent.connect.elasticsearch.ElasticsearchSinkConnector",
+        "tasks.max": "1",
+        "topics": "EventrOrder",
+        "connection.url": "http://elasticsearch:9200",
+        "key.ignore": "false",
+        "type.name": "order",
+        "behavior.on.null.values" : "delete",
+        "topic.index.map" : "EventrOrder:eventrorder",
+        "transforms": "unwrap,key",
+        "transforms.unwrap.type": "io.debezium.transforms.UnwrapFromEnvelope",
+        "transforms.key.type": "org.apache.kafka.connect.transforms.ExtractField$Key",
+        "transforms.key.field": "id"
+    }
+}
+EOF
+----
+
+This listens to the `EventrOrder` topic and pushes corresponding index updates to Elasticsearch.
+As index names must be lower-cased, the topic is named to the "eventrorder" index name.
+The `UnwrapFromEnvelope` transformation is used to extract only the "after" state from Debezium's change events.
+Using the `ExtractField` transformation we make sure that the original record id is used as the document id in Elasticsearch.
+
+If the connector is deployed, you can query the index via its REST API.
+
+Get its URL by executing:
+
+[source]
+$ oc get routes elasticsearch -o=jsonpath='{.spec.host}{"\n"}'
+
+Open that URL in a browser, it should be in the form http://elasticsearch-voxxed.192.168.33.10.nip.io/.
+
+To browse the contents of the `eventrorder` index, go to http://elasticsearch-voxxed.192.168.33.10.nip.io/eventrorder/_search?pretty.
+Alternatively, you can use curl to do so:
+
+[source]
+$ oc exec -i my-cluster-kafka-0 -- curl -s -X GET "elasticsearch:9200/eventrorder/_search?pretty"
+
+Again create or update a few orders in the event application and you'll see how the Elasticsearch index is updated based on that.
+
+==== Streaming Aggregate Events To Elasticsearch
+
+By default Debezium creates one Kafka topic per table captured in the source database.
+It often is a requirement though to have events that contain a complete aggregate from the domain model,
+e.g. an order and all its order lines.
+
+There are different approaches for creating such aggregate events:
+
+* Use a streaming query engine such as KStreams to join the topics of the involved tables
+* Materialize aggregates in a separate table within the source database
+
+In the following we're going to follow the second option.
+For that, a small extension to Hibernate ORM has been provided as part of the example application.
+By means of putting the `@MaterializeAggregate` annotation to an aggregate root of the domain model,
+this entity and all its dependent types will be serialized as a JSON structure into the `aggregates` within the source database.
+We then can use Debezium to capture the changes of that table.
+A https://github.com/debezium/microservices-lab/blob/master/json-expansion-smt/src/main/java/io/debezium/aggregation/smt/ExpandJsonSmt.java[Kafka Connect SMT] (single message transformation) is used to route the change events retrieved from that aggregate table into one topic per aggregate type.
+
+The following shows an overview of this approach:
+
+image::local_view_materialization.png[Local View Materalization]
+
+Let's begin by adding the `@MaterializeAggregate` annotation to the `Order` entity.
+On your host machine, edit the file _eventr/src/main/java/io/debezium/examples/eventr/model/Order.java_:
+
+[source,java]
+----
+@MaterializeAggregate(aggregateName="orders_with_event")
+public class Order implements Serializable {
+    // ...
+}
+----
+
+The file should look like https://github.com/debezium/microservices-lab/blob/master/eventr/src/main/java/io/debezium/examples/eventr/model/Order.java[this] eventually.
+
+Commit the change and push it to your GitHub fork:
+
+[source, sh]
+$ git commit -a -m "Materializing order aggregates"
+$ git push origin module3
+
+Then, in the VM running OpenShift, start another build of the "eventrapp" application.
+This will fetch your change, build the application and redeploy it:
+
+[source, sh]
+$ oc start-build eventrapp
+
+Next, start a build of Kafka Connect containing the SMT mentioned above:
+
+[source,sh]
+----
+cd plugins/debezium-connector-mysql && \
+curl -O https://raw.githubusercontent.com/debezium/microservices-lab/master/json-expansion-smt/json-expansion-smt-1.0.0.Final.jar && \
+cd .. && \
+oc start-build debezium-connect --from-dir=. --follow && \
+cd ..
+----
+
+Once the build has completed and Kafka Connect is running again,
+register another instance of the Debezium MySQL connector:
+
+[source,sh]
+----
+$ oc exec -c kafka -i my-cluster-kafka-0 -- curl -s -X POST -w "\n" \
+    -H "Accept:application/json" \
+    -H "Content-Type:application/json" \
+    http://debezium-connect-api:8083/connectors -d @- <<'EOF'
+
+{
+    "name": "aggregates-connector",
+    "config": {
+        "connector.class": "io.debezium.connector.mysql.MySqlConnector",
+        "tasks.max": "1",
+        "database.hostname": "mysql",
+        "database.port": "3306",
+        "database.user": "debezium",
+        "database.password": "dbz",
+        "database.server.id": "184055",
+        "database.server.name": "dbserver1_aggregates",
+        "database.whitelist": "inventory",
+        "table.whitelist": "inventory\\.aggregates",
+        "database.history.kafka.bootstrap.servers": "my-cluster-kafka-bootstrap:9092",
+        "database.history.kafka.topic": "schema-changes.inventory_aggregates",
+        "transforms" : "expandjson",
+        "transforms.expandjson.type": "io.debezium.aggregation.smt.ExpandJsonSmt"
+    }
+}
+EOF
+----
+
+This captures only changes to the `aggregates` table and applies the `ExpandJsonSmt` SMT for routing the events to the correct topic
+(each entry from the `aggregates` table will be routed into a Kafka topic with the name configured via the `@MaterializeAggregate` annotations).
+After the connector has been deployed, create a few records in the example application and observe the corresponding aggregate events in the Kafka topic:
+
+[source,sh]
+----
+$ oc exec -c zookeeper -it my-cluster-zookeeper-0 -- /opt/kafka/bin/kafka-console-consumer.sh \
+   --bootstrap-server my-cluster-kafka-bootstrap:9092 \
+   --from-beginning \
+   --property print.key=true \
+   --topic orders_with_event
+----
+
+Let's deploy another instance of the Elasticsearch sink connector for streaming the aggregate events into Elasticsearch:
+
+[source,sh]
+----
+$ oc exec -c kafka -i my-cluster-kafka-0 -- curl -s -X POST -w "\n" \
+    -H "Accept:application/json" \
+    -H "Content-Type:application/json" \
+    http://debezium-connect-api:8083/connectors -d @- <<'EOF'
+{
+    "name": "orders-with-event-sink",
+    "config": {
+        "connector.class": "io.confluent.connect.elasticsearch.ElasticsearchSinkConnector",
+        "tasks.max": "1",
+        "topics": "orders_with_event",
+        "connection.url": "http://elasticsearch:9200",
+        "key.ignore": "false",
+        "type.name": "orders_with_event",
+        "behavior.on.null.values" : "delete",
+        "transforms": "unwrap,key",
+        "transforms.unwrap.type": "io.debezium.transforms.UnwrapFromEnvelope",
+        "transforms.key.type": "org.apache.kafka.connect.transforms.ExtractField$Key",
+        "transforms.key.field": "id"
+    }
+}
+EOF
+----
+
+To browse the contents of the `orders_with_event` index, go to http://elasticsearch-voxxed.192.168.33.10.nip.io/orders_with_event/_search?pretty
+(adjust IP as needed).
+Alternatively, you can use curl to do so:
+
+[source]
+$ oc exec -i my-cluster-kafka-0 -- curl -s -X GET "elasticsearch:9200/orders_with_event/_search?pretty"
+
+Having the complete aggregate within a single index allows for efficient queries based on all the properties of the aggregate,
+no matter in which table they are stored within the source database.
+
+==== Bonus: Programmatically Consuming Data Change Events
+
+If you still got some time left, let's explore how to programmatically consume the data change events produced by Debezium.
+I.e. not only Kafka Connect sink connectors can be used to consume the events, but you also can do so quite easily using a custom Java application and the Kafka consumer API.
+
+As an example consider a microservice that needs (parts of) another service's data in order to perform its tasks.
+That second service could subscribe to the data changes of the first one one,
+apply some transformations, filtering etc. before persisting the first service's data in its own database.
+That way it will be able to perform its tasks, without performing any sorts of synchronous requests to the first microservice.
+
+As a starting point we've prepared another Thorntail application that consumes the events from the `EventrOrder` topic:
+
+[source,sh]
+----
+$ oc new-app --name=cdc-consumer-app debezium/msa-lab-s2i:latest~https://github.com/<your fork>/microservices-lab.git#module3 \
+    --context-dir=debezium-thorntail-demo \
+    -e MYSQL_DATABASE=inventory \
+    -e AB_PROMETHEUS_OFF=true \
+    -e KAFKA_SERVICE_HOST=my-cluster-kafka-bootstrap \
+    -e KAFKA_SERVICE_PORT=9092 \
+    -e JAVA_OPTIONS=-Djava.net.preferIPv4Stack=true \
+    -e ORDER_TOPIC_NAME=EventrOrder
+
+# Expose port 8080
+$ oc patch service cdc-consumer-app -p '{ "spec" : { "ports" : [{ "name" : "8080-tcp", "port" : 8080, "protocol" : "TCP", "targetPort" : 8080 }] } } }'
+
+# Expose service
+$ oc expose svc cdc-consumer-app
+----
+
+There are two message consumers, _debezium-thorntail-demo/src/main/java/com/example/dbzdemo/SysoutChangeEventHandler.java_ and _debezium-thorntail-demo/src/main/java/com/example/dbzdemo/ws/WebSocketChangeEventHandler.java_.
+They are implemented using the Kafka CDI extension we've already seen in part two.
+The former simply prints out every message it receives.
+The latter propagates each received event to connect browsers via WebSockets.
+
+Once the application is running (use `oc get pods` to verify), you can observe how the two handlers react to the change events.
+For the former, check out the logs:
+
+[source,sh]
+----
+$ oc logs $(oc get pods -o name -l app=cdc-consumer-app)
+----
+
+For the latter, get the URL of the exposed service:
+[source]
+$ oc get routes cdc-consumer-app -o=jsonpath='{.spec.host}{"\n"}'
+
+Open that URL in a browser, it should be in the form http://cdc-consumer-app-voxxed.192.168.33.10.nip.io/.
+
+Modify some entries in the "eventr" application and observe how the change events are propagated to the other browser window via WebSockets in near-realtime.
+
+If you like, play a bit with the consumer application and adjust it to your requirements.
+
+==== Environment cleanup
+
+After you complete all modules in this exercise then you can clean up the environment by issuing commands
+
+[source,sh]
+$ oc cluster down
+$ mount | grep -o '/home/build/openshift.local.clusterup/[^ ]*' | xargs sudo umount && sudo rm -rf $HOME/openshift.local.clusterup
+
+=== Summary
+
+In this part of the lab you've learned about the concept of change data capture and how to implement it using Debezium and Kafka (Connect).
+You've set up the Debezium connector for MySQL to ingest changes of an existing Java EE application,
+without requiring any code changes to that application.
+Then you've explored different ways for consuming the change events:
+using Kafka Connect and the JDBC sink adaptor to simply stream the data into a PostgreSQL database
+and using Thorntail and CDI to consume change events programmatically and relay them to a web browser using WebSockets.
+
+To learn more about Debezium, refer to its homepage http://debezium.io[http://debezium.io],
+where you can find an extensive tutorial, documentation and more.
