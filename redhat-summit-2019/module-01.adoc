@@ -240,4 +240,59 @@ In addition to the `cluster operator` created previously, notice a few more depl
 
 Also, notice that the ZooKeeper ensemble and the Kafka cluster are deployed as stateful sets.
 
+=== Testing the Deployment
+
+Now, let's quickly test that the deployed Kafka cluster works.
+Get a shell on one of the cluster pods:
+
+----
+$ oc rsh production-ready-kafka-0
+----
+
+Next, start a producer:
+
+----
+$ bin/kafka-console-producer.sh --broker-list localhost:9092 --topic test-topic
+----
+
+Once the console producer is started, enter a few values:
+
+----
+> test
+> test2
+----
+
+(Do not worry if you see the warnings below.
+They are part of the interaction and indicate that the topic has not been found and broker will autocreate the `test-topic`.
+The message `test` will be properly received by Kafka).
+
+----
+OpenJDK 64-Bit Server VM warning: If the number of processors is expected to increase from one, then you should configure the number of parallel GC threads appropriately using -XX:ParallelGCThreads=N
+>test
+[2019-02-05 15:32:46,828] WARN [Producer clientId=console-producer] Error while fetching metadata with correlation id 1 : {test-topic=LEADER_NOT_AVAILABLE} (org.apache.kafka.clients.NetworkClient)
+[2019-02-05 15:32:46,939] WARN [Producer clientId=console-producer] Error while fetching metadata with correlation id 3 : {test-topic=LEADER_NOT_AVAILABLE} (org.apache.kafka.clients.NetworkClient)
+>test2
+----
+
+Now let's open another terminal into the cluster pod in a separate terminal (open another `ssh` terminal into the workstation):
+
+----
+$ oc rsh production-ready-kafka-0
+----
+
+Start a consumer:
+
+----
+bin/kafka-console-consumer.sh --bootstrap-server localhost:9092 --topic test-topic --from-beginning
+----
+
+Once the consumer is started, you should see the previously sent messages in the output.
+Reverting to the terminal where we started the console producer and sending any new messages there will result in those messages being displayed in the consumer terminal.
+
+Finally, exit from the terminal of both containers.
+
+----
+exit
+----
+
 Now that your Kafka cluster is running and ready to go, let's continue with <<module-02#,module 2>> and build some applications!
