@@ -32,7 +32,7 @@ It is based on https://thorntail.io/[Thorntail], an approach for building micros
 Start a MySQL instance by running:
 
 [source, sh]
-$ oc new-app --name=mysql debezium/example-mysql:0.8 \
+$ oc new-app --name=mysql debezium/example-mysql:0.9 \
     -e MYSQL_ROOT_PASSWORD=debezium \
     -e MYSQL_USER=mysqluser \
     -e MYSQL_PASSWORD=mysqlpw
@@ -51,7 +51,7 @@ Again we're using the source-to-image process for that:
 
 [source,sh]
 ----
-$ oc new-app --name=eventrapp debezium/msa-lab-s2i:latest~https://github.com/<your fork>/microservices-lab#module3 \
+$ oc new-app --name=eventrapp debezium/msa-lab-s2i:latest~https://github.com/debezium/microservices-lab \
     --context-dir=eventr \
     -e AB_PROMETHEUS_OFF=true \
     -e JAVA_OPTIONS=-Djava.net.preferIPv4Stack=true
@@ -112,14 +112,15 @@ This makes it very easy to create a Kafka Connect cluster with additional connec
 
 [source]
 ----
-$ oc login -u system:admin
+$ oc apply -f examples/templates/cluster-operator/connect-s2i-template.yaml -n amq-streams
+
 $ oc process strimzi-connect-s2i \
     -p CLUSTER_NAME=debezium \
     -p KAFKA_CONNECT_CONFIG_STORAGE_REPLICATION_FACTOR=1 \
     -p KAFKA_CONNECT_OFFSET_STORAGE_REPLICATION_FACTOR=1 \
     -p KAFKA_CONNECT_STATUS_STORAGE_REPLICATION_FACTOR=1 \
+    -p KAFKA_CONNECT_BOOTSTRAP_SERVERS=production-ready-kafka-bootstrap:9092 \
     | oc apply -f -
-$ oc login -u developer
 ----
 
 Use `oc status` to verify that the S2I process has finished
@@ -129,11 +130,11 @@ Use `oc status` to verify that the S2I process has finished
 ----
 $ oc status
 
-In project voxxed on server https://127.0.0.1:8443
+In project amq-streams on server https://master00.example.com:443
 
 svc/debezium-connect-api - 172.30.17.34:8083
   dc/debezium-connect deploys istag/debezium-connect:latest <-
-    bc/debezium-connect source builds uploaded code on istag/debezium-connect-source:0.8.0
+    bc/debezium-connect source builds uploaded code on istag/debezium-connect-source:1.0.0
       not built yet
     deployment #2 deployed about a minute ago - 1 pod
     deployment #1 failed 2 minutes ago: newer deployment was found running
@@ -152,7 +153,7 @@ Extract the downloaded files and trigger another S2I build of `debezium-connect`
 
 [source,sh]
 ----
-export DEBEZIUM_VERSION=0.8.3.Final
+export DEBEZIUM_VERSION=0.9.4.Final
 mkdir -p plugins && cd plugins && \
 curl http://central.maven.org/maven2/io/debezium/debezium-connector-mysql/$DEBEZIUM_VERSION/debezium-connector-mysql-$DEBEZIUM_VERSION-plugin.tar.gz | tar xz; \
 mkdir confluent-jdbc-sink && cd confluent-jdbc-sink && \
@@ -208,7 +209,7 @@ Once that's the case, register an instance of the Debezium MySQL connector using
 
 [source]
 ----
-$ oc exec -c kafka -i my-cluster-kafka-0 -- curl -s  -w "\n" -X POST \
+$ oc exec -c kafka -i production-ready-kafka-0 -- curl -s  -w "\n" -X POST \
     -H "Accept:application/json" \
     -H "Content-Type:application/json" \
     http://debezium-connect-api:8083/connectors -d @- <<'EOF'
@@ -225,7 +226,7 @@ $ oc exec -c kafka -i my-cluster-kafka-0 -- curl -s  -w "\n" -X POST \
         "database.server.id": "184054",
         "database.server.name": "dbserver1",
         "database.whitelist": "inventory",
-        "database.history.kafka.bootstrap.servers": "my-cluster-kafka-bootstrap:9092",
+        "database.history.kafka.bootstrap.servers": "production-ready-kafka-bootstrap:9092",
         "database.history.kafka.topic": "schema-changes.inventory",
         "transforms": "route",
         "transforms.route.type": "org.apache.kafka.connect.transforms.RegexRouter",
@@ -252,7 +253,7 @@ You can examine CDC messages in Kafka using the console consumer (use Ctrl + C t
 [source]
 ----
 $ oc exec -c zookeeper -it my-cluster-zookeeper-0 -- /opt/kafka/bin/kafka-console-consumer.sh \
-   --bootstrap-server my-cluster-kafka-bootstrap:9092 \
+   --bootstrap-server production-ready-kafka-bootstrap:9092 \
    --from-beginning \
    --property print.key=true \
    --topic EventrOrder
@@ -513,7 +514,7 @@ Using the Kafka Connect REST API, you also can query the list of connectors, que
 [source]
 ----
 # List all connectors
-$ oc exec -c kafka -i my-cluster-kafka-0 -- curl -w "\n" -s -X GET \
+$ oc exec -c kafka -i production-ready-kafka-0 -- curl -w "\n" -s -X GET \
     -H "Accept:application/json" \
     -H "Content-Type:application/json" \
     http://debezium-connect-api:8083/connectors
@@ -522,7 +523,7 @@ $ oc exec -c kafka -i my-cluster-kafka-0 -- curl -w "\n" -s -X GET \
 [source]
 ----
 # Get status of "inventory-connector"
-$ oc exec -c kafka -i my-cluster-kafka-0 -- curl -w "\n" -s -X GET \
+$ oc exec -c kafka -i production-ready-kafka-0 -- curl -w "\n" -s -X GET \
     -H "Accept:application/json" \
     -H "Content-Type:application/json" \
     http://debezium-connect-api:8083/connectors/inventory-connector/status
@@ -531,7 +532,7 @@ $ oc exec -c kafka -i my-cluster-kafka-0 -- curl -w "\n" -s -X GET \
 [source]
 ----
 # Restart "inventory-connector"
-$ oc exec -c kafka -i my-cluster-kafka-0 -- curl -w "\n" -s -X POST \
+$ oc exec -c kafka -i production-ready-kafka-0 -- curl -w "\n" -s -X POST \
     -H "Accept:application/json" \
     -H "Content-Type:application/json" \
     http://debezium-connect-api:8083/connectors/inventory-connector/restart
@@ -540,7 +541,7 @@ $ oc exec -c kafka -i my-cluster-kafka-0 -- curl -w "\n" -s -X POST \
 [source]
 ----
 # Delete "inventory-connector" (don't run it, as we'll still need the connector in the following)
-$ oc exec -c kafka -i my-cluster-kafka-0 -- curl -w "\n" -s -X DELETE \
+$ oc exec -c kafka -i production-ready-kafka-0 -- curl -w "\n" -s -X DELETE \
     -H "Accept:application/json" \
     -H "Content-Type:application/json" \
     http://debezium-connect-api:8083/connectors/inventory-connector
@@ -576,7 +577,7 @@ This connector can be used to propagate Kafka messages to relational databases v
 
 [source]
 ----
-$ oc exec -c kafka -i my-cluster-kafka-0 -- curl  -w "\n" -s -X POST \
+$ oc exec -c kafka -i production-ready-kafka-0 -- curl  -w "\n" -s -X POST \
     -H "Accept:application/json" \
     -H "Content-Type:application/json" \
     http://debezium-connect-api:8083/connectors -d @- <<'EOF'
@@ -685,7 +686,7 @@ it's time to register an instance of the Elasticsearch sink connector:
 
 [source]
 ----
-$ oc exec -c kafka -i my-cluster-kafka-0 -- curl -X POST -s -w "\n" \
+$ oc exec -c kafka -i production-ready-kafka-0 -- curl -X POST -s -w "\n" \
     -H "Accept:application/json" \
     -H "Content-Type:application/json" \
     http://debezium-connect-api:8083/connectors -d @- <<'EOF'
@@ -727,7 +728,7 @@ To browse the contents of the `eventrorder` index, go to http://elasticsearch-vo
 Alternatively, you can use curl to do so:
 
 [source]
-$ oc exec -i my-cluster-kafka-0 -- curl -s -X GET "elasticsearch:9200/eventrorder/_search?pretty"
+$ oc exec -i production-ready-kafka-0 -- curl -s -X GET "elasticsearch:9200/eventrorder/_search?pretty"
 
 Again create or update a few orders in the event application and you'll see how the Elasticsearch index is updated based on that.
 
@@ -794,7 +795,7 @@ register another instance of the Debezium MySQL connector:
 
 [source,sh]
 ----
-$ oc exec -c kafka -i my-cluster-kafka-0 -- curl -s -X POST -w "\n" \
+$ oc exec -c kafka -i production-ready-kafka-0 -- curl -s -X POST -w "\n" \
     -H "Accept:application/json" \
     -H "Content-Type:application/json" \
     http://debezium-connect-api:8083/connectors -d @- <<'EOF'
@@ -812,7 +813,7 @@ $ oc exec -c kafka -i my-cluster-kafka-0 -- curl -s -X POST -w "\n" \
         "database.server.name": "dbserver1_aggregates",
         "database.whitelist": "inventory",
         "table.whitelist": "inventory\\.aggregates",
-        "database.history.kafka.bootstrap.servers": "my-cluster-kafka-bootstrap:9092",
+        "database.history.kafka.bootstrap.servers": "production-ready-kafka-bootstrap:9092",
         "database.history.kafka.topic": "schema-changes.inventory_aggregates",
         "transforms" : "expandjson",
         "transforms.expandjson.type": "io.debezium.aggregation.smt.ExpandJsonSmt"
@@ -828,7 +829,7 @@ After the connector has been deployed, create a few records in the example appli
 [source,sh]
 ----
 $ oc exec -c zookeeper -it my-cluster-zookeeper-0 -- /opt/kafka/bin/kafka-console-consumer.sh \
-   --bootstrap-server my-cluster-kafka-bootstrap:9092 \
+   --bootstrap-server production-ready-kafka-bootstrap:9092 \
    --from-beginning \
    --property print.key=true \
    --topic orders_with_event
@@ -838,7 +839,7 @@ Let's deploy another instance of the Elasticsearch sink connector for streaming 
 
 [source,sh]
 ----
-$ oc exec -c kafka -i my-cluster-kafka-0 -- curl -s -X POST -w "\n" \
+$ oc exec -c kafka -i production-ready-kafka-0 -- curl -s -X POST -w "\n" \
     -H "Accept:application/json" \
     -H "Content-Type:application/json" \
     http://debezium-connect-api:8083/connectors -d @- <<'EOF'
@@ -866,7 +867,7 @@ To browse the contents of the `orders_with_event` index, go to http://elasticsea
 Alternatively, you can use curl to do so:
 
 [source]
-$ oc exec -i my-cluster-kafka-0 -- curl -s -X GET "elasticsearch:9200/orders_with_event/_search?pretty"
+$ oc exec -i production-ready-kafka-0 -- curl -s -X GET "elasticsearch:9200/orders_with_event/_search?pretty"
 
 Having the complete aggregate within a single index allows for efficient queries based on all the properties of the aggregate,
 no matter in which table they are stored within the source database.
@@ -889,7 +890,7 @@ $ oc new-app --name=cdc-consumer-app debezium/msa-lab-s2i:latest~https://github.
     --context-dir=debezium-thorntail-demo \
     -e MYSQL_DATABASE=inventory \
     -e AB_PROMETHEUS_OFF=true \
-    -e KAFKA_SERVICE_HOST=my-cluster-kafka-bootstrap \
+    -e KAFKA_SERVICE_HOST=production-ready-kafka-bootstrap \
     -e KAFKA_SERVICE_PORT=9092 \
     -e JAVA_OPTIONS=-Djava.net.preferIPv4Stack=true \
     -e ORDER_TOPIC_NAME=EventrOrder
