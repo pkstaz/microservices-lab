@@ -166,7 +166,7 @@ $ oc apply -f https://raw.githubusercontent.com/RedHatWorkshops/workshop-amq-str
 
 Let's take a look at the resource we've created:
 
-[source, sh]
+[source]
 ----
 $ oc describe kafka production-ready
 
@@ -288,6 +288,13 @@ bin/kafka-console-consumer.sh --bootstrap-server localhost:9092 --topic test-top
 
 Once the consumer is started, you should see the previously sent messages in the output.
 Reverting to the terminal where we started the console producer and sending any new messages there will result in those messages being displayed in the consumer terminal.
+
+Of course all the tools coming with Apache Kafka can be used, for instance in order to list all the available topics:
+
+[source]
+----
+$ oc exec -it production-ready-kafka-0 -c kafka -- bin/kafka-topics.sh --zookeeper localhost:2181 --list
+----
 
 Finally, exit from the terminal of both containers.
 

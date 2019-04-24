@@ -156,6 +156,7 @@ Extract the downloaded files and trigger another S2I build of `debezium-connect`
 export DEBEZIUM_VERSION=0.9.4.Final
 mkdir -p plugins && cd plugins && \
 curl http://central.maven.org/maven2/io/debezium/debezium-connector-mysql/$DEBEZIUM_VERSION/debezium-connector-mysql-$DEBEZIUM_VERSION-plugin.tar.gz | tar xz; \
+curl http://central.maven.org/maven2/io/debezium/debezium-connector-postgres/$DEBEZIUM_VERSION/debezium-connector-postgres-$DEBEZIUM_VERSION-plugin.tar.gz | tar xz; \
 mkdir confluent-jdbc-sink && cd confluent-jdbc-sink && \
 curl -O http://central.maven.org/maven2/org/postgresql/postgresql/42.2.2/postgresql-42.2.2.jar && \
 curl -O http://packages.confluent.io/maven/io/confluent/kafka-connect-jdbc/5.0.0/kafka-connect-jdbc-5.0.0.jar && \
@@ -252,7 +253,7 @@ You can examine CDC messages in Kafka using the console consumer (use Ctrl + C t
 
 [source]
 ----
-$ oc exec -c zookeeper -it my-cluster-zookeeper-0 -- /opt/kafka/bin/kafka-console-consumer.sh \
+$ oc exec -c zookeeper -it production-ready-zookeeper-0 -- /opt/kafka/bin/kafka-console-consumer.sh \
    --bootstrap-server production-ready-kafka-bootstrap:9092 \
    --from-beginning \
    --property print.key=true \
@@ -732,145 +733,271 @@ $ oc exec -i production-ready-kafka-0 -- curl -s -X GET "elasticsearch:9200/even
 
 Again create or update a few orders in the event application and you'll see how the Elasticsearch index is updated based on that.
 
-==== Streaming Aggregate Events To Elasticsearch
+To wrap up this section and make room for more explorations,
+remove all the applications created during this part of the lab:
 
-By default Debezium creates one Kafka topic per table captured in the source database.
-It often is a requirement though to have events that contain a complete aggregate from the domain model,
-e.g. an order and all its order lines.
+[source]
+$ oc delete all -l app=eventrapp
+$ oc delete all -l app=elasticsearch
+$ oc delete all -l app=postgresql-95-centos7
+$ oc delete all -l app=mysql
 
-There are different approaches for creating such aggregate events:
+==== Explicit Event Structure with the Outbox Pattern
 
-* Use a streaming query engine such as KStreams to join the topics of the involved tables
-* Materialize aggregates in a separate table within the source database
+In this section we'll have a look at leveraging change data capture for the purposes of data exchange between microservices.
+Typically, microservices don't exist in isolation but require data managed by other services in order to perform their tasks.
+One common example are two microservices for processing purchase orders and handling shipments for such orders:
+the shipment service will require the data on purchase orders managed by the order service.
 
-In the following we're going to follow the second option.
-For that, a small extension to Hibernate ORM has been provided as part of the example application.
-By means of putting the `@MaterializeAggregate` annotation to an aggregate root of the domain model,
-this entity and all its dependent types will be serialized as a JSON structure into the `aggregates` within the source database.
-We then can use Debezium to capture the changes of that table.
-A https://github.com/debezium/microservices-lab/blob/master/json-expansion-smt/src/main/java/io/debezium/aggregation/smt/ExpandJsonSmt.java[Kafka Connect SMT] (single message transformation) is used to route the change events retrieved from that aggregate table into one topic per aggregate type.
+There are different ways how the order service can notify the shipment service about new or updated orders;
+for instance it could invoke a REST API provided by the shipment service.
+This raises issues in terms of availability, though; if the shipment service cannot be reached,
+the order service either cannot proceed at all or it will have to implement some kind of buffering of the API requests,
+waiting until the shipment service becomes available again.
 
-The following shows an overview of this approach:
+These issues are avoided by using asynchronous communication.
+If the order service sends messages via a broker such as Apache Kafka,
+it is not impacted by any downtimes of the shipment service.
+As the order service will need to persist any incoming orders in its own local database, though,
+it cannot directly send messages to Apache Kafka, as that would get us back to the "dual write" issues discussed in the previous module.
+Also the service would now be tied to the availability of Kafka itself.
 
+So what could an alternative be?
+Change data capture shows a way out.
+By streaming changes out of the order service's database,
+all these issues are circumvented: the only resource that the order service relies on synchronously,
+is its own database.
+Now streaming changes of the services business tables (e.g. the table containing purchase orders)
+might raise concerns about exposing implementation details to downstream consumers.
+If for instance a column type changes, any consuming services will have to adjust accordingly in order to process the corresponding change events.
+This is where the outbox pattern comes in: the idea is that the order service updates its actual busines tables
+and at the same time *also* inserts an event record into a special "outbox" table within the same database.
+These two actions happen within one transaction, so consistency is ensured.
+Then change data capture and Debezium are used to capture only the changes (new entries) in this outbox table.
+Via Apache Kafka, these events will be propagated to any consumers asynchronously, in a eventually consistent fashion.
+The structure of the events (e.g. a JSON payload) is part of the order service's public API,
+so great take care should be taken when altering their format.
+
+In the following let's take a look how the outbox pattern can be implemented with Debezium.
+This image shows an overview of the overall design:
+
+TODO: update image
 image::local_view_materialization.png[Local View Materalization]
 
-Let's begin by adding the `@MaterializeAggregate` annotation to the `Order` entity.
-On your host machine, edit the file _eventr/src/main/java/io/debezium/examples/eventr/model/Order.java_:
+Let's begin by setting up an instance of Postgres as the database for the order service.
+For this, we need a dedicated service account which will be used to run the database container
+(that's required due to the way the Postgres image handles file permissions internally):
+
+[source]
+$ oc create sa debezium -n amq-streams
+$ oc adm policy add-scc-to-user anyuid system:serviceaccount:amq-streams:debezium
+
+Then we can set up a new instance of Postgres:
+
+[source]
+$ oc new-app --name=postgresql debezium/example-postgres:0.9 \
+    -e POSTGRES_USER=postgresuser \
+    -e POSTGRES_PASSWORD=postgrespw \
+    -e POSTGRES_DB=orderdb
+
+And make it use the previously set up service account:
+
+[source]
+$ oc patch dc/postgresql --type merge -p '{ "spec" : { "template" : { "spec" : { "serviceAccountName" : "debezium" } } } }'
+
+Once the database pod is up and running, we can deploy an instance of an example order service provided for this lab.
+It is a Java EE application running on WildFly.
+OpenShift comes with s2i support for WildFly, too, so it's very easy to deploy the service:
+
+[source,sh]
+----
+$ oc new-app --name=orderservice openshift/wildfly-160-centos7:latest~https://github.com/gunnarmorling/microservices-lab \
+    --context-dir=outbox/order-service \
+    -e AB_PROMETHEUS_OFF=true \
+    -e JAVA_OPTIONS=-Djava.net.preferIPv4Stack=true \
+    -e POSTGRESQL_DATABASE=orderdb \
+    -e POSTGRESQL_USER=postgresuser \
+    -e POSTGRESQL_PASSWORD=postgrespw \
+    -e POSTGRESQL_DATASOURCE=OrderDS
+----
+
+This uses the WildFly 16 s2i builder image to produce a deployment for a project from the given git repository.
+It also sets up a datasource named "OrderDS" which makes the previously set up Postgres database available to the application.
+
+Now let's take a look at how the order service application creates the events in the outbox table.
+The relevant code lives in the OrderService class, with the `addOrder()` method looking like so:
 
 [source,java]
 ----
-@MaterializeAggregate(aggregateName="orders_with_event")
-public class Order implements Serializable {
-    // ...
+@Transactional
+public PurchaseOrder addOrder(PurchaseOrder order) {
+    order = entityManager.merge(order);
+
+    event.fire(OrderCreatedEvent.of(order));
+    event.fire(InvoiceCreatedEvent.of(order));
+
+    return order;
 }
 ----
 
-The file should look like https://github.com/debezium/microservices-lab/blob/master/eventr/src/main/java/io/debezium/examples/eventr/model/Order.java[this] eventually.
+This uses the JPA entity manager to persist a new purchase order;
+at the same time it creates two events derived from this order:
+one representing the creation of this purchase order and another one representing the creation of a corresponding invoice.
+These events are processed synchronously as part of the same transaction.
+They are handled by the EventSender class, which observes all event types derived from `ExportedEvent` and serializes them into the "outbox" table:
 
-Commit the change and push it to your GitHub fork:
-
-[source, sh]
-$ git commit -a -m "Materializing order aggregates"
-$ git push origin module3
-
-Then, in the VM running OpenShift, start another build of the "eventrapp" application.
-This will fetch your change, build the application and redeploy it:
-
-[source, sh]
-$ oc start-build eventrapp
-
-Next, start a build of Kafka Connect containing the SMT mentioned above:
-
-[source,sh]
+[source,java]
 ----
-cd plugins/debezium-connector-mysql && \
-curl -O https://raw.githubusercontent.com/debezium/microservices-lab/master/json-expansion-smt/json-expansion-smt-1.0.0.Final.jar && \
-cd .. && \
-oc start-build debezium-connect --from-dir=. --follow && \
-cd ..
-----
+@ApplicationScoped
+public class EventSender {
 
-Once the build has completed and Kafka Connect is running again,
-register another instance of the Debezium MySQL connector:
+    @PersistenceContext
+    private EntityManager entityManager;
 
-[source,sh]
-----
-$ oc exec -c kafka -i production-ready-kafka-0 -- curl -s -X POST -w "\n" \
-    -H "Accept:application/json" \
-    -H "Content-Type:application/json" \
-    http://debezium-connect-api:8083/connectors -d @- <<'EOF'
+    public void onExportedEvent(@Observes ExportedEvent event) {
+        OutboxEvent outboxEvent = new OutboxEvent(
+                event.getAggregateType(),
+                event.getAggregateId(),
+                event.getType(),
+                event.getPayload(),
+                event.getTimestamp()
+        );
 
-{
-    "name": "aggregates-connector",
-    "config": {
-        "connector.class": "io.debezium.connector.mysql.MySqlConnector",
-        "tasks.max": "1",
-        "database.hostname": "mysql",
-        "database.port": "3306",
-        "database.user": "debezium",
-        "database.password": "dbz",
-        "database.server.id": "184055",
-        "database.server.name": "dbserver1_aggregates",
-        "database.whitelist": "inventory",
-        "table.whitelist": "inventory\\.aggregates",
-        "database.history.kafka.bootstrap.servers": "production-ready-kafka-bootstrap:9092",
-        "database.history.kafka.topic": "schema-changes.inventory_aggregates",
-        "transforms" : "expandjson",
-        "transforms.expandjson.type": "io.debezium.aggregation.smt.ExpandJsonSmt"
+        entityManager.persist(outboxEvent);
     }
 }
+----
+
+The order service provides a REST API for placing purchase orders.
+So let's invoke this API to create an order and examine the corresponding database entries.
+
+[source]
+----
+$ oc exec -c kafka -i production-ready-kafka-0 -- curl -X POST -s -w "\n" \
+    -H "Accept:application/json" \
+    -H "Content-Type:application/json" \
+    http://orderservice:8080/rest/orders -d @- <<'EOF'
+    {
+        "customerId" : "123",
+        "orderDate" : "2019-01-31T12:13:01",
+        "lineItems" : [
+            {
+                "item" : "Debezium in Action",
+                "quantity" : 2,
+                "totalPrice" : 39.98
+            },
+            {
+                "item" : "Debezium for Dummies",
+                "quantity" : 1,
+                "totalPrice" : 29.99
+            }
+        ]
+    }
 EOF
 ----
 
-This captures only changes to the `aggregates` table and applies the `ExpandJsonSmt` SMT for routing the events to the correct topic
-(each entry from the `aggregates` table will be routed into a Kafka topic with the name configured via the `@MaterializeAggregate` annotations).
-After the connector has been deployed, create a few records in the example application and observe the corresponding aggregate events in the Kafka topic:
+Once the order has been created, get a shell in the Postgres container:
 
 [source,sh]
 ----
-$ oc exec -c zookeeper -it my-cluster-zookeeper-0 -- /opt/kafka/bin/kafka-console-consumer.sh \
+$ oc rsh $(oc get pods -o name -l app=postgresql)
+----
+
+Then use _psql_ to get all records from the `purchaseorder` and `outboxevent` tables:
+
+[source,sh]
+----
+psql -U postgresuser orderdb -c 'select * from "purchaseorder"'
+psql -U postgresuser orderdb -c 'select * from "outboxevent"'
+----
+
+The structure of the latter one is interesting in particular.
+It has the following columns:
+
+* `id`: unique id of each message; can be used by consumers to detect any duplicate events, e.g. when restarting to read messages after a failure.
+Generated when creating a new event.
+* `aggregatetype`: the type of the _aggregate root_ to which a given event is related;
+the idea being, leaning on the same concept of domain-driven design,
+that exported events should refer to an aggregate
+(https://martinfowler.com/bliki/DDD_Aggregate.html["a cluster of domain objects that can be treated as a single unit"]),
+where the aggregate root provides the sole entry point for accessing any of the entities within the aggregate.
+This could for instance be "purchase order" or "customer".
++
+This value will be used to route events to corresponding topics in Kafka,
+so there'd be a topic for all events related to purchase orders,
+one topic for all customer-related events etc.
+Note that also events pertaining to a child entity contained within one such aggregate should use that same type.
+So e.g. an event representing the cancelation of an individual order line
+(which is part of the purchase order aggregate)
+should also use the type of its aggregate root, "order",
+ensuring that also this event will go into the "order" Kafka topic.
+* `aggregateid`: the id of the aggregate root that is affected by a given event; this could for instance be the id of a purchase order or a customer id;
+Similar to the aggregate type, events pertaining to a sub-entity contained within an aggregate should use the id of the containing aggregate root,
+e.g. the purchase order id for an order line cancelation event.
+This id will be used as the key for Kafka messages later on.
+That way, all events pertaining to one aggregate root or any of its contained sub-entities will go into the same partition of that Kafka topic,
+which ensures that consumers of that topic will consume all the events related to one and the same aggregate in the exact order as they were produced.
+* `type`: the type of event, e.g. "Order Created" or "Order Line Canceled". Allows consumers to trigger suitable event handlers.
+* `payload`: a JSON structure with the actual event contents, e.g. containing a purchase order, information about the purchaser, contained order lines, their price etc.
+
+Now it's time to set up an instance of Debezium's Postgres connector for exporting the events from the outbox table to Apache Kafka:
+
+[source,sh]
+----
+$ oc exec -c kafka -i production-ready-kafka-0 -- curl -s -X PUT -w "\n" \
+    -H "Accept:application/json" \
+    -H "Content-Type:application/json" \
+    http://debezium-connect-api:8083/connectors/outbox-connector/config -d @- <<'EOF'
+
+    {
+        "connector.class": "io.debezium.connector.postgresql.PostgresConnector",
+        "tasks.max": "1",
+        "database.hostname": "postgresql",
+        "database.port": "5432",
+        "database.user": "postgresuser",
+        "database.password": "postgrespw",
+        "database.dbname" : "orderdb",
+        "database.server.name": "dbserver1",
+        "schema.whitelist": "public",
+        "table.whitelist" : "public.outboxevent",
+        "tombstones.on.delete" : "false",
+        "transforms" : "outbox",
+        "transforms.outbox.type" : "io.debezium.transforms.outbox.EventRouter",
+        "transforms.outbox.route.topic.replacement" : "${routedByValue}.events",
+        "transforms.outbox.table.field.event.timestamp" : "timestamp"
+    }
+EOF
+----
+
+Besides the configuration parts we've seen before (database host name, credentials, table whitelist etc.),
+there's a special SMT `EventRouter` applied.
+This one comes with Debezium and serves the purpose for routing the events from an outbox table to specific topics.
+It can be configured in many ways, but here we're using the default configuration mostly.
+By default, the value from the `aggregatetype` column is used for topic routing.
+By means of the `transforms.outbox.route.topic.replacement` option, the values from this column ("order", "customer" are used to derive topic names ("order.events", "customer.events").
+The value from the `aggregateid` column is used as the message key,
+ensuring that all events in one topic pertaining to the same entity (order, customer etc.) will go to the same partition of the corresponding Kafka topic.
+If needed, the SMT could be configured to make us of other column for these purposes.
+
+With the connector being deployed, we can take a look at the `order.events` topic:
+
+[source]
+oc exec -c zookeeper -it production-ready-zookeeper-0 -- /opt/kafka/bin/kafka-console-consumer.sh \
    --bootstrap-server production-ready-kafka-bootstrap:9092 \
    --from-beginning \
    --property print.key=true \
-   --topic orders_with_event
-----
+   --topic order.events
 
-Let's deploy another instance of the Elasticsearch sink connector for streaming the aggregate events into Elasticsearch:
+Note how the event payload is a string-ified JSON, i.e. the event structure is opaque to the schema of the message in Kafka.
 
-[source,sh]
-----
-$ oc exec -c kafka -i production-ready-kafka-0 -- curl -s -X POST -w "\n" \
-    -H "Accept:application/json" \
-    -H "Content-Type:application/json" \
-    http://debezium-connect-api:8083/connectors -d @- <<'EOF'
-{
-    "name": "orders-with-event-sink",
-    "config": {
-        "connector.class": "io.confluent.connect.elasticsearch.ElasticsearchSinkConnector",
-        "tasks.max": "1",
-        "topics": "orders_with_event",
-        "connection.url": "http://elasticsearch:9200",
-        "key.ignore": "false",
-        "type.name": "orders_with_event",
-        "behavior.on.null.values" : "delete",
-        "transforms": "unwrap,key",
-        "transforms.unwrap.type": "io.debezium.transforms.UnwrapFromEnvelope",
-        "transforms.key.type": "org.apache.kafka.connect.transforms.ExtractField$Key",
-        "transforms.key.field": "id"
-    }
-}
-EOF
-----
-
-To browse the contents of the `orders_with_event` index, go to http://elasticsearch-voxxed.192.168.33.10.nip.io/orders_with_event/_search?pretty
-(adjust IP as needed).
-Alternatively, you can use curl to do so:
+TODO: show event consumer
 
 [source]
-$ oc exec -i production-ready-kafka-0 -- curl -s -X GET "elasticsearch:9200/orders_with_event/_search?pretty"
-
-Having the complete aggregate within a single index allows for efficient queries based on all the properties of the aggregate,
-no matter in which table they are stored within the source database.
+$ oc new-app --name=shipmentdb mariadb/server \
+    -e MARIADB_USER=mariadbuser \
+    -e MARIADB_PASSWORD=mariadbpw \
+    -e MARIADB_DATABASE=shipmentdb \
+    -e MARIADB_RANDOM_ROOT_PASSWORD=true
 
 ==== Bonus: Programmatically Consuming Data Change Events
 
