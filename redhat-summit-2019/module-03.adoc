@@ -18,7 +18,6 @@ In this module of the lab you'll learn the following things:
 * Different ways of processing change data events
 ** Streaming data changes to a PostgreSQL sink database
 ** Streaming data changes to an Elasticsearch index
-** Streaming aggregate events to an Elasticsearch index
 
 The overall architecture of this lab module looks like this:
 
@@ -999,66 +998,205 @@ $ oc new-app --name=shipmentdb mariadb/server \
     -e MARIADB_DATABASE=shipmentdb \
     -e MARIADB_RANDOM_ROOT_PASSWORD=true
 
-==== Bonus: Programmatically Consuming Data Change Events
-
-If you still got some time left, let's explore how to programmatically consume the data change events produced by Debezium.
-I.e. not only Kafka Connect sink connectors can be used to consume the events, but you also can do so quite easily using a custom Java application and the Kafka consumer API.
-
-As an example consider a microservice that needs (parts of) another service's data in order to perform its tasks.
-That second service could subscribe to the data changes of the first one one,
-apply some transformations, filtering etc. before persisting the first service's data in its own database.
-That way it will be able to perform its tasks, without performing any sorts of synchronous requests to the first microservice.
-
-As a starting point we've prepared another Thorntail application that consumes the events from the `EventrOrder` topic:
-
-[source,sh]
-----
-$ oc new-app --name=cdc-consumer-app debezium/msa-lab-s2i:latest~https://github.com/<your fork>/microservices-lab.git#module3 \
-    --context-dir=debezium-thorntail-demo \
-    -e MYSQL_DATABASE=inventory \
-    -e AB_PROMETHEUS_OFF=true \
-    -e KAFKA_SERVICE_HOST=production-ready-kafka-bootstrap \
-    -e KAFKA_SERVICE_PORT=9092 \
-    -e JAVA_OPTIONS=-Djava.net.preferIPv4Stack=true \
-    -e ORDER_TOPIC_NAME=EventrOrder
-
-# Expose port 8080
-$ oc patch service cdc-consumer-app -p '{ "spec" : { "ports" : [{ "name" : "8080-tcp", "port" : 8080, "protocol" : "TCP", "targetPort" : 8080 }] } } }'
-
-# Expose service
-$ oc expose svc cdc-consumer-app
-----
-
-There are two message consumers, _debezium-thorntail-demo/src/main/java/com/example/dbzdemo/SysoutChangeEventHandler.java_ and _debezium-thorntail-demo/src/main/java/com/example/dbzdemo/ws/WebSocketChangeEventHandler.java_.
-They are implemented using the Kafka CDI extension we've already seen in part two.
-The former simply prints out every message it receives.
-The latter propagates each received event to connect browsers via WebSockets.
-
-Once the application is running (use `oc get pods` to verify), you can observe how the two handlers react to the change events.
-For the former, check out the logs:
-
 [source,sh]
 ----
 $ oc logs $(oc get pods -o name -l app=cdc-consumer-app)
 ----
 
-For the latter, get the URL of the exposed service:
+To wrap up this section, remove the resources we've created:
+
 [source]
-$ oc get routes cdc-consumer-app -o=jsonpath='{.spec.host}{"\n"}'
+$ oc delete all -l app=orderservice
+$ oc delete all -l app=postgresql
 
-Open that URL in a browser, it should be in the form http://cdc-consumer-app-voxxed.192.168.33.10.nip.io/.
+==== Bonus: Processing Data Change Events with Kafka Streams
 
-Modify some entries in the "eventr" application and observe how the change events are propagated to the other browser window via WebSockets in near-realtime.
+If you still got some time left, let's explore how Debezium's data change events can be processed in a streaming query using the Kafka Streams API.
+This API allows you to run operations on Kafka topics such as filtering, joining, aggregating etc. and can be a very powerful tool to gain real-time insight into your data as it changes.
+Whenever new messages in the processed topics arrive, the KStreams pipeline will run and produce corresponding streaming query results,
+which then for instance can be written into another topic.
 
-If you like, play a bit with the consumer application and adjust it to your requirements.
+The following example again is about the management of purchase orders,
+which in this case belong to specific product categories such as "furniture", "toys" etc.
+We're interested in the aggregated revenue per product category in sliding time windows.
+
+We're going to deploy a producer application which creates new random purchase orders at a given rate.
+Debezium is used to capture changes to the `orders` table and produce change events into a corresponding Kafka topic.
+In a separate application, the KStreams pipeline for aggregating the revenue values is executed.
+
+Let's begin by deploying a MySQL database which will hold the purchase orders:
+
+[source]
+$ oc new-app https://github.com/gunnarmorling/debezium-examples.git#kstreams-live-update-thorntail --strategy=docker --name=mysql --context-dir=kstreams-live-update/example-db \
+    -e MYSQL_ROOT_PASSWORD=debezium \
+    -e MYSQL_USER=mysqluser \
+    -e MYSQL_PASSWORD=mysqlpw
+
+Next we deploy the event producer application:
+
+[source]
+$ oc new-app --name=event-source debezium/msa-lab-s2i:latest~https://github.com/gunnarmorling/debezium-examples.git#kstreams-live-update-thorntail \
+    --context-dir=kstreams-live-update/event-source \
+    -e JAVA_MAIN_CLASS=io.debezium.examples.kstreams.liveupdate.eventsource.Main
+
+It contains a simple Java main class that runs an https://github.com/debezium/debezium-examples/blob/master/kstreams-live-update/event-source/src/main/java/io/debezium/examples/kstreams/liveupdate/eventsource/EventSource.java[event source] which inserts random orders in a loop.
+
+Use `oc get pods` to verify that both applications have been deployed and are running.
+
+If you haven't done so yet, start an instance of Debezium's tooling container image in a separate shell session:
+
+[source]
+$ oc run tooling -it --image=debezium/tooling --restart=Never
+
+Within the tooling pod, you can use `mycli` to see that new orders are created
+(e.g. run `SELECT COUNT(1) FROM orders` repeatedly):
+
+[source,sh]
+mycli mysql://mysqluser@mysql:3306/inventory --password mysqlpw
+
+Exit `mycli` (Ctrl + D).
+
+Now let's deploy an instance of the Debezium connector for MySQL for capturing new purchase order and product category topics.
+Still in the tooling pod, run this command:
+
+[source,sh]
+----
+cat <<'EOF' > register-mysql-source.json
+
+{
+    "name": "mysql-source",
+    "config": {
+        "connector.class": "io.debezium.connector.mysql.MySqlConnector",
+        "tasks.max": "1",
+        "database.hostname": "mysql",
+        "database.port": "3306",
+        "database.user": "debezium",
+        "database.password": "dbz",
+        "database.server.id": "184055",
+        "database.server.name": "dbserver1",
+        "decimal.handling.mode" : "string",
+        "table.whitelist": "inventory.orders,inventory.categories",
+        "database.history.kafka.bootstrap.servers": "production-ready-kafka-bootstrap:9092",
+        "database.history.kafka.topic": "schema-changes.inventory"
+    }
+}
+EOF
+cat register-mysql-source.json | http POST http://debezium-connect-api:8083/connectors/
+----
+
+With the connector being deployed, we can examine the contents of the Kafka topics for product categories and purchase orders:
+
+[source,sh]
+----
+kafkacat -b production-ready-kafka-bootstrap -t dbserver1.inventory.categories -C -o beginning | jq ."payload"
+----
+
+[source,sh]
+----
+kafkacat -b production-ready-kafka-bootstrap -t dbserver1.inventory.orders -C -o end | jq ."payload"
+----
+
+The former doesn't show any activity, there are just the events from the initial snapshot of the categories table.
+This is expected, as no new categories are added.
+In contrast, the orders topic contains new messages for each newly produced record in the orders table.
+
+Run the following in the other shell session (i.e. not within the tooling pod):
+
+[source,sh]
+----
+$ oc new-app --name=aggregator debezium/msa-lab-s2i:latest~https://github.com/gunnarmorling/debezium-examples.git#kstreams-live-update-thorntail \
+    --context-dir=kstreams-live-update/aggregator \
+    -e AB_PROMETHEUS_OFF=true \
+    -e KAFKA_BOOTSTRAP_SERVERS=production-ready-kafka-bootstrap:9092 \
+    -e JAVA_OPTIONS=-Djava.net.preferIPv4Stack=true
+
+$ oc patch dc/aggregator -p '[{"op": "add", "path": "/spec/template/spec/containers/0/ports/1", "value":{"containerPort":8080,"protocol":"TCP"}}]' --type=json
+
+$ oc patch service aggregator -p '{ "spec" : { "ports" : [{ "name" : "8080-tcp", "port" : 8080, "protocol" : "TCP", "targetPort" : 8080 }] } } }'
+
+$ oc expose svc aggregator
+----
+
+The most interesting part of this application is the https://github.com/debezium/debezium-examples/blob/master/kstreams-live-update/aggregator/src/main/java/io/debezium/examples/kstreams/liveupdate/aggregator/StreamsPipelineManager.java[StreamsPipelineManager] class,
+which defines the Kafka Streams pipeline to run.
+It looks like so:
+
+[source,java]
+----
+KTable<Long, Category> category = builder.table("dbserver1.inventory.categories", Consumed.with(longKeySerde, categorySerde));
+
+KStream<Windowed<String>, String> salesPerCategory = builder.stream(
+        "dbserver1.inventory.orders",
+        Consumed.with(longKeySerde, orderSerde)
+        )
+
+        // Join with categories on category id
+        .selectKey((k, v) -> v.categoryId)
+        .join(
+                category,
+                (value1, value2) -> {
+                    value1.categoryName = value2.name;
+                    return value1;
+                },
+                Joined.with(Serdes.Long(), orderSerde, null)
+        )
+
+        // Group by category name, windowed by 5 sec
+        .selectKey((k, v) -> v.categoryName)
+        .groupByKey(Serialized.with(Serdes.String(), orderSerde))
+        .windowedBy(TimeWindows.of(Duration.ofSeconds(5).toMillis()))
+
+        // Accumulate category sales per time window
+        .aggregate(
+                () -> 0L, /* initializer */
+                (aggKey, newValue, aggValue) -> {
+                    aggValue += newValue.salesPrice;
+                    return aggValue;
+                },
+                Materialized.with(Serdes.String(), Serdes.Long())
+        )
+        .mapValues(v -> BigDecimal.valueOf(v)
+                .divide(BigDecimal.valueOf(100), 2, RoundingMode.HALF_UP))
+        .mapValues(v -> String.valueOf(v))
+
+        // Push to WebSockets
+        .toStream()
+        .peek((k, v) -> {
+            websocketsEndPoint.getSessions().forEach(s -> {
+                try {
+                    s.getBasicRemote().sendText("{ \"category\" : \"" + k.key() + "\", \"accumulated-sales\" : " + v + " }");
+                }
+                catch (IOException e) {
+                    throw new RuntimeException(e);
+                }
+            });
+});
+----
+
+It does the following things:
+
+* Set up a `KTable` representing the current state of the categories topic
+* Set up a `KStream` representing the orders topic; whenever there's a new message in that topic, the pipeline will be executed
+* Join the orders stream with the categories table (this requires to choose the category id as the stream key, as joins are only possible if the key on both sides is the same);
+The join result also contains the name of the category of the represented order
+* Group the values by category name and build windows of the events with a time window size of 5 seconds
+* Within each category and 5 second time window, sum up the value of all purchase orders
+* Map the result value to a string and emit a JSON structure comprising the category name and aggregated revenue value via WebSockets
+
+For the last step, the application also provides a web sockets endpoint.
+The produced JSON structure will be pushed to all connected web sockets clients.
+To see this in action, open the aggregator application in a web browser.
+You can find its URL next to the "aggregator" application in the OpenShift web console or
+by running:
+
+[source]
+$ oc get routes aggregator -o=jsonpath='{.spec.host}{"\n"}'
+
+You should see a simple chart which is updated when ever new revenue values are sent to the browser.
 
 ==== Environment cleanup
 
-After you complete all modules in this exercise then you can clean up the environment by issuing commands
-
-[source,sh]
-$ oc cluster down
-$ mount | grep -o '/home/build/openshift.local.clusterup/[^ ]*' | xargs sudo umount && sudo rm -rf $HOME/openshift.local.clusterup
+tbd.
 
 === Summary
 
@@ -1069,5 +1207,5 @@ Then you've explored different ways for consuming the change events:
 using Kafka Connect and the JDBC sink adaptor to simply stream the data into a PostgreSQL database
 and using Thorntail and CDI to consume change events programmatically and relay them to a web browser using WebSockets.
 
-To learn more about Debezium, refer to its homepage http://debezium.io[http://debezium.io],
+To learn more about Debezium, refer to its homepage http://debezium.io[https://debezium.io/],
 where you can find an extensive tutorial, documentation and more.
