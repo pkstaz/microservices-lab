@@ -1,30 +1,28 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
-         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/maven-v4_0_0.xsd">
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+  xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+  xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/maven-v4_0_0.xsd">
   <modelVersion>4.0.0</modelVersion>
   <groupId>io.debezium.examples</groupId>
   <artifactId>tickets-msa-invoice</artifactId>
   <name>Tickets MSA Example - Invoice Service</name>
   <version>1.0.0-SNAPSHOT</version>
-  <packaging>war</packaging>
 
   <properties>
-    <version.thorntail>2.2.0.Final</version.thorntail>
-    <version.org.aerogear.kafka.cdi>0.0.12</version.org.aerogear.kafka.cdi>
+    <version.quarkus>0.13.3</version.quarkus>
     <maven.compiler.source>1.8</maven.compiler.source>
     <maven.compiler.target>1.8</maven.compiler.target>
-    <failOnMissingWebXml>false</failOnMissingWebXml>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
   </properties>
 
   <dependencyManagement>
     <dependencies>
       <dependency>
-        <groupId>io.thorntail</groupId>
-        <artifactId>bom-all</artifactId>
-        <version>${version.thorntail}</version>
-        <scope>import</scope>
+        <groupId>io.quarkus</groupId>
+        <artifactId>quarkus-bom</artifactId>
+        <version>${version.quarkus}</version>
         <type>pom</type>
+        <scope>import</scope>
       </dependency>
     </dependencies>
   </dependencyManagement>
@@ -33,21 +31,16 @@
     <finalName>invoice</finalName>
     <plugins>
       <plugin>
-        <groupId>io.thorntail</groupId>
-        <artifactId>thorntail-maven-plugin</artifactId>
-        <version>${version.thorntail}</version>
+        <groupId>io.quarkus</groupId>
+        <artifactId>quarkus-maven-plugin</artifactId>
+        <version>${version.quarkus}</version>
         <configuration>
-          <environment>
-            <KAFKA_SERVICE_HOST>localhost</KAFKA_SERVICE_HOST>
-            <KAFKA_SERVICE_PORT>9092</KAFKA_SERVICE_PORT>
-            <TT_PORT_OFFSET>200</TT_PORT_OFFSET>
-            <ORDER_TOPIC_NAME>myorders</ORDER_TOPIC_NAME>
-          </environment>
+          <uberJar>true</uberJar>
         </configuration>
         <executions>
           <execution>
             <goals>
-              <goal>package</goal>
+              <goal>build</goal>
             </goals>
           </execution>
         </executions>
@@ -56,24 +49,52 @@
   </build>
 
   <dependencies>
-
     <dependency>
-      <groupId>io.thorntail</groupId>
-      <artifactId>cdi</artifactId>
+      <groupId>io.quarkus</groupId>
+      <artifactId>quarkus-resteasy</artifactId>
     </dependency>
     <dependency>
-      <groupId>io.thorntail</groupId>
-      <artifactId>undertow</artifactId>
+      <groupId>io.quarkus</groupId>
+      <artifactId>quarkus-smallrye-reactive-messaging</artifactId>
     </dependency>
     <dependency>
-      <groupId>io.thorntail</groupId>
-      <artifactId>microprofile-config</artifactId>
+      <groupId>io.quarkus</groupId>
+      <artifactId>quarkus-smallrye-reactive-messaging-kafka</artifactId>
     </dependency>
-
     <dependency>
-      <groupId>org.aerogear.kafka</groupId>
-      <artifactId>kafka-cdi-extension</artifactId>
-      <version>${version.org.aerogear.kafka.cdi}</version>
+        <groupId>io.quarkus</groupId>
+        <artifactId>quarkus-netty</artifactId>
+    </dependency>
+    <dependency>
+        <groupId>io.quarkus</groupId>
+        <artifactId>quarkus-vertx</artifactId>
     </dependency>
   </dependencies>
+
+  <profiles>
+    <profile>
+      <id>native</id>
+      <build>
+        <plugins>
+          <plugin>
+            <groupId>io.quarkus</groupId>
+            <artifactId>quarkus-maven-plugin</artifactId>
+            <version>${version.quarkus}</version>
+            <executions>
+              <execution>
+                <goals>
+                  <goal>native-image</goal>
+                </goals>
+                <configuration>
+                  <enableHttpUrlHandler>true</enableHttpUrlHandler>
+                  <autoServiceLoaderRegistration>false</autoServiceLoaderRegistration>
+                </configuration>
+              </execution>
+            </executions>
+          </plugin>
+        </plugins>
+      </build>
+    </profile>
+  </profiles>
+
 </project>
