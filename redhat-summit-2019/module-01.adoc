@@ -28,21 +28,22 @@ Topic management works in a similar fashion: for creating and modifying topics, 
 
 You will do all this as part of the first lab.
 
-=== Connecting to the Workstation Node and Logging In Into OpenShift
+=== Logging In Into OpenShift
 
-...
-
-[source, sh]
-$ ssh cloud-user<YOUR SERVER IP>
-
-Log into to OpenShift as the `admin` user with the password supplied by the instructor.
+Once you have SSH'ed into the workstation node, log into to OpenShift as the `admin` user with the password supplied by the instructor.
 
 [source, sh]
-oc login -u admin master00.example.com
+$ oc login -u admin master00.example.com
 
 https://kubernetes.io/docs/concepts/overview/working-with-objects/namespaces/[Namespaces] (or "projects" in OpenShift terms) are a concept of Kubernetes for organizing and dividing the resources of a cluster between multiple users.
 There should already be a project named "amq-streams" (verify by running `oc get projects`).
-If that's not the case, you can created it like so:
+In order to work within this project, run:
+
+[source, sh]
+$ oc project amq-streams
+Now using project "amq-streams" on server "https://master00.example.com:443".
+
+If the project doesn't exist yet, you can created it like so:
 
 [source, sh]
 oc new-project amq-streams
@@ -109,8 +110,11 @@ NAME                                          READY     STATUS    RESTARTS   AGE
 strimzi-cluster-operator-2044197322-lzrvr   1/1       Running   0          3m
 
 You also can log into the OpenShift web console to do the same.
-Go to https://192.168.33.10:8443 (adjust IP if needed; accept all warnings about certificate issues),
-log in using "developer" and any password, and choose the "voxxed" project.
+Go to https://master00-<GUID>.generic.opentlc.com/ (using the same credentials),
+accept all warnings about certificate issues.
+Choose the "amq-streams" project from the menu on the right.
+If you see a warning "An error occurred getting metrics", just click on "Don't Show Me Again",
+as it's not relevant for this lab.
 You should see a single deployed application, "strimzi-cluster-operator".
 All the applications you'll deploy in the following will show up automatically, too.
 
