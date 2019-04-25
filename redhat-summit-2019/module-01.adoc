@@ -243,63 +243,53 @@ Also, notice that the ZooKeeper ensemble and the Kafka cluster are deployed as s
 === Testing the Deployment
 
 Now, let's quickly test that the deployed Kafka cluster works.
-Get a shell on one of the cluster pods:
+Execute the following:
+
+[source, sh]
+$ oc run producer -it --image=debezium/tooling --restart=Never
+
+This starts a container with some useful tooling for dealing with Apache Kafka and its topics,
+e.g. kafkacat for sending and consuming messages, httpie for invoking REST APIs and some more.
+
+Let's send some messages using kafkacat:
 
 ----
-$ oc rsh production-ready-kafka-0
+echo "mykey:test" | kafkacat -b production-ready-kafka-bootstrap -t test-topic -Z -K:
+echo "mykey:test2" | kafkacat -b production-ready-kafka-bootstrap -t test-topic -Z -K:
 ----
 
-Next, start a producer:
+Open another SSH session on your workstation to the cluster and fire up another tooling pod:
+
+[source, sh]
+$ oc run consumer -it --image=debezium/tooling --restart=Never
+
+Start kafkacat in consumer mode for receiving the messages sent above:
 
 ----
-$ bin/kafka-console-producer.sh --broker-list localhost:9092 --topic test-topic
-----
-
-Once the console producer is started, enter a few values:
-
-----
-> test
-> test2
-----
-
-(Do not worry if you see the warnings below.
-They are part of the interaction and indicate that the topic has not been found and broker will autocreate the `test-topic`.
-The message `test` will be properly received by Kafka).
-
-----
-OpenJDK 64-Bit Server VM warning: If the number of processors is expected to increase from one, then you should configure the number of parallel GC threads appropriately using -XX:ParallelGCThreads=N
->test
-[2019-02-05 15:32:46,828] WARN [Producer clientId=console-producer] Error while fetching metadata with correlation id 1 : {test-topic=LEADER_NOT_AVAILABLE} (org.apache.kafka.clients.NetworkClient)
-[2019-02-05 15:32:46,939] WARN [Producer clientId=console-producer] Error while fetching metadata with correlation id 3 : {test-topic=LEADER_NOT_AVAILABLE} (org.apache.kafka.clients.NetworkClient)
->test2
-----
-
-Now let's open another terminal into the cluster pod in a separate terminal (open another `ssh` terminal into the workstation):
-
-----
-$ oc rsh production-ready-kafka-0
-----
-
-Start a consumer:
-
-----
-bin/kafka-console-consumer.sh --bootstrap-server localhost:9092 --topic test-topic --from-beginning
+kafkacat -b production-ready-kafka-bootstrap -t test-topic -o beginning -f 'offset: %o, key: %k, value: %s\n'
 ----
 
 Once the consumer is started, you should see the previously sent messages in the output.
 Reverting to the terminal where we started the console producer and sending any new messages there will result in those messages being displayed in the consumer terminal.
 
-Of course all the tools coming with Apache Kafka can be used, for instance in order to list all the available topics:
+Of course also all the tools coming with Apache Kafka can be used, for instance in order to list all the available topics:
 
 [source]
 ----
 $ oc exec -it production-ready-kafka-0 -c kafka -- bin/kafka-topics.sh --zookeeper localhost:2181 --list
 ----
 
-Finally, exit from the terminal of both containers.
-
+Finally, exit from the terminal of both containers:
 ----
 exit
+----
+
+Also delete the corresponding pods:
+
+[source]
+----
+$ oc delete pod producer
+$ oc delete pod consumer
 ----
 
 Now that your Kafka cluster is running and ready to go, let's continue with <<module-02#,module 2>> and build some applications!
