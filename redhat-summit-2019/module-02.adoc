@@ -254,14 +254,16 @@ You should see messages like this:
 
 [source]
 ----
-2018-10-25 07:17:08,412 INFO  [io.debezium.examples.ticketmsa.invoice.InvoiceService] (EE-ManagedExecutorService-default-Thread-1) Order event '{"id":7,"firstName":"John","lastName":"Doe","email":"john.doe@example.com","price":1000}' arrived
+2019-04-26 07:59:10,828 INFO  [io.deb.exa.tic.inv.InvoiceService] (vert.x-eventloop-thread-0) Order event '{"id":8,"firstName":"John","lastName":"Doe","email":"john.doe@example.com","price":1000}' arrived
 ----
+
+=== Summary
 
 In this part of the lab you've learned how to propagate data between two microservices using Kafka.
 
 There's one potential problem, though: the "order" application writes data to its database _and_ Kafka at the same time.
 As these two resources are not modified within a single global transaction, it might happen that inconsistencies occur e.g. when the change is applied to the database but the write to Kafka failed for some reason.
-In the <<module-03#,module 3>> we'll introduce an alternative approach which avoids these issues by tracking changes in the database in order to write them into Kafka.
+In <<module-03#,module 3>> we'll introduce an alternative approach which avoids these issues by tracking changes in the database in order to write them into Kafka.
 This is known as "change data capture".
 
 Once done with this part of the workshop, delete the two applications and the database like so:

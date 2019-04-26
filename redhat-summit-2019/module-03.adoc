@@ -25,8 +25,8 @@ image::debezium-demo.png[Module 3 Architecture Overview]
 
 === Setting Up the Example Application
 
-We've prepared a small https://github.com/debezium/microservices-lab/tree/master/eventr[CRUD microservice for managing orders of events], which we'll use in the following as source of data change events.
-It is based on https://thorntail.io/[Thorntail], an approach for building microservices using Java EE and MicroProfile, and uses MySQL as its database.
+For this part of the lab we've prepared a small https://github.com/debezium/microservices-lab/tree/master/eventr[CRUD microservice for managing orders of events], which we'll use in the following as source of data change events.
+This one is based on https://thorntail.io/[Thorntail], an approach for building microservices using Java EE and MicroProfile, and uses MySQL as its database.
 
 Start a MySQL instance by running:
 
@@ -36,17 +36,7 @@ $ oc new-app --name=mysql debezium/example-mysql:0.9 \
     -e MYSQL_USER=mysqluser \
     -e MYSQL_PASSWORD=mysqlpw
 
-On your host machine, check out a new branch for this module of the workshop and push it to your fork on GitHub:
-
-[source, sh]
-----
-# In microservices-lab
-git checkout -b module3 upstream/module3-start
-git push origin module3
-----
-
-Then, in the VM running OpenShift, build and start the application.
-Again we're using the source-to-image process for that:
+To build and start the application, we're using the source-to-image process as in the previous module:
 
 [source,sh]
 ----
@@ -91,6 +81,7 @@ The hostname of the exposed eventrapp service is available in the OpenShift cons
 [source]
 $ oc get routes eventrapp -o=jsonpath='{.spec.host}{"\n"}'
 
+TODO: use correct format
 Note the output, which should be in the format eventrapp-voxxed.192.168.33.10.nip.io and you can http://eventrapp-voxxed.192.168.33.10.nip.io[navigate there] using a browser.
 Alternatively, you could click on the application's URL within the OpenShift web UI.
 
@@ -103,7 +94,7 @@ Now it's time to deploy Kafka Connect and Debezium.
 Kafka Connect is a platform for streaming data between Apache Kafka and other systems.
 It provides a framework and runtime environment for _source connectors_ (for getting data into Kafka)
 and _sink connectors_ (for getting data out of Kafka).
-Debezium provides a set of CDC source connectors for databases such as MySQL, PostgreSQL and MongoDB.
+Debezium provides a set of CDC source connectors for databases such as MySQL, PostgreSQL, SQL Server and MongoDB.
 
 Let's begin by setting up a Kafka Connect cluster,
 using the S2I process provided by Strimzi.
@@ -113,6 +104,11 @@ This makes it very easy to create a Kafka Connect cluster with additional connec
 ----
 $ oc apply -f examples/templates/cluster-operator/connect-s2i-template.yaml -n amq-streams
 
+template.template.openshift.io/strimzi-connect-s2i created
+----
+
+[source]
+----
 $ oc process strimzi-connect-s2i \
     -p CLUSTER_NAME=debezium \
     -p KAFKA_CONNECT_CONFIG_STORAGE_REPLICATION_FACTOR=1 \
@@ -120,6 +116,8 @@ $ oc process strimzi-connect-s2i \
     -p KAFKA_CONNECT_STATUS_STORAGE_REPLICATION_FACTOR=1 \
     -p KAFKA_CONNECT_BOOTSTRAP_SERVERS=production-ready-kafka-bootstrap:9092 \
     | oc apply -f -
+
+kafkaconnects2i.kafka.strimzi.io/debezium created
 ----
 
 Use `oc status` to verify that the S2I process has finished
@@ -205,36 +203,28 @@ debezium-connect-3-mpscv                      1/1       Running     0          1
 ...
 ----
 
-Once that's the case, register an instance of the Debezium MySQL connector using the REST API of Kafka Connect:
+Once that's the case, register an instance of the Debezium MySQL connector using the REST API of Kafka Connect.
+Change to the tooling pod and submit the following request with httpie:
 
 [source]
 ----
-$ oc exec -c kafka -i production-ready-kafka-0 -- curl -s  -w "\n" -X POST \
-    -H "Accept:application/json" \
-    -H "Content-Type:application/json" \
-    http://debezium-connect-api:8083/connectors -d @- <<'EOF'
-
-{
-    "name": "inventory-connector",
-    "config": {
-        "connector.class": "io.debezium.connector.mysql.MySqlConnector",
-        "tasks.max": "1",
-        "database.hostname": "mysql",
-        "database.port": "3306",
-        "database.user": "debezium",
-        "database.password": "dbz",
-        "database.server.id": "184054",
-        "database.server.name": "dbserver1",
-        "database.whitelist": "inventory",
-        "database.history.kafka.bootstrap.servers": "production-ready-kafka-bootstrap:9092",
-        "database.history.kafka.topic": "schema-changes.inventory",
-        "transforms": "route",
-        "transforms.route.type": "org.apache.kafka.connect.transforms.RegexRouter",
-        "transforms.route.regex": "([^.]+)\\.([^.]+)\\.([^.]+)",
-        "transforms.route.replacement": "$3"
-    }
-}
-EOF
+echo '{
+    "connector.class": "io.debezium.connector.mysql.MySqlConnector",
+    "tasks.max": "1",
+    "database.hostname": "mysql",
+    "database.port": "3306",
+    "database.user": "debezium",
+    "database.password": "dbz",
+    "database.server.id": "184054",
+    "database.server.name": "dbserver1",
+    "database.whitelist": "inventory",
+    "database.history.kafka.bootstrap.servers": "production-ready-kafka-bootstrap:9092",
+    "database.history.kafka.topic": "schema-changes.inventory",
+    "transforms": "route",
+    "transforms.route.type": "org.apache.kafka.connect.transforms.RegexRouter",
+    "transforms.route.regex": "([^.]+)\\.([^.]+)\\.([^.]+)",
+    "transforms.route.replacement": "$3"
+}' | http PUT http://debezium-connect-api:8083/connectors/inventory-connector/config
 ----
 
 This sets up an instance of Debezium's `io.debezium.connector.mysql.MySqlConnector` class,
@@ -248,15 +238,14 @@ Kafka Connect’s log file should contain messages regarding execution of initia
 $ oc logs $(oc get pods -o name -l strimzi.io/name=debezium-connect)
 ----
 
-You can examine CDC messages in Kafka using the console consumer (use Ctrl + C to exit the tool):
+You can examine CDC messages in Kafka using kafkacat (use Ctrl + C to exit the tool):
 
 [source]
 ----
-$ oc exec -c zookeeper -it production-ready-zookeeper-0 -- /opt/kafka/bin/kafka-console-consumer.sh \
-   --bootstrap-server production-ready-kafka-bootstrap:9092 \
-   --from-beginning \
-   --property print.key=true \
-   --topic EventrOrder
+$ kafkacat -b production-ready-kafka-bootstrap \
+   -t EventrOrder \
+   -o beginning \
+   -f 'offset: %o, key: %k, value: %s\n'
 ----
 
 At this point you should see messages originating from the initial snapshot performed by the connector.
@@ -577,26 +566,18 @@ This connector can be used to propagate Kafka messages to relational databases v
 
 [source]
 ----
-$ oc exec -c kafka -i production-ready-kafka-0 -- curl  -w "\n" -s -X POST \
-    -H "Accept:application/json" \
-    -H "Content-Type:application/json" \
-    http://debezium-connect-api:8083/connectors -d @- <<'EOF'
-{
-    "name": "jdbc-sink",
-    "config": {
-        "connector.class": "io.confluent.connect.jdbc.JdbcSinkConnector",
-        "tasks.max": "1",
-        "topics": "EventrOrder",
-        "connection.url": "jdbc:postgresql://postgresql-95-centos7:5432/inventory?user=postgresuser&password=postgrespw",
-        "transforms": "unwrap",
-        "transforms.unwrap.type": "io.debezium.transforms.UnwrapFromEnvelope",
-        "auto.create": "true",
-        "insert.mode": "upsert",
-        "pk.fields": "id",
-        "pk.mode": "record_value"
-    }
-}
-EOF
+echo '{
+    "connector.class": "io.confluent.connect.jdbc.JdbcSinkConnector",
+    "tasks.max": "1",
+    "topics": "EventrOrder",
+    "connection.url": "jdbc:postgresql://postgresql-95-centos7:5432/inventory?user=postgresuser&password=postgrespw",
+    "transforms": "unwrap",
+    "transforms.unwrap.type": "io.debezium.transforms.UnwrapFromEnvelope",
+    "auto.create": "true",
+    "insert.mode": "upsert",
+    "pk.fields": "id",
+    "pk.mode": "record_value"
+}' | http PUT http://debezium-connect-api:8083/connectors/jdbc-sink/config
 ----
 
 This sets up an an instance of `io.confluent.connect.jdbc.JdbcSinkConnector`,
@@ -606,18 +587,18 @@ As this sink connector just expects the effective state of changed rows
 only this part is extracted using Debezium's `UnwrapFromEnvelope` SMT (single message transform).
 
 With the sink connector being set up, we can take a look into the PostgreSQL database and see how the table changes are propgated there.
-Get a shell on the pod of the PostgreSQL service:
+Still in the tooling pod, execute:
 
 [source,sh]
 ----
-$ oc rsh $(oc get pods -o name -l app=postgresql-95-centos7)
+$ pgcli postgresql://postgresuser:postgrespw@postgresql-95-centos7:5432/inventory
 ----
 
 Run a query to get all records from the table corresponding to the monitored topic:
 
-[source,sh]
+[source]
 ----
-psql -U postgresuser inventory -c 'select * from "EventrOrder"'
+select * from "EventrOrder";
 ----
 
 As you alter records in the source web application,
@@ -638,7 +619,7 @@ exit
 The beauty of using Apache Kafka for streaming change events is its flexibility.
 As the topics are persistent, additional consumers can come up which have not been known when data changes originally occurred.
 
-As an example, lets stream the `EvntrOrder` events to Elasticsearch now, too, making them available to the powerful fulltext search capabilities.
+As an example, lets stream the `EventrOrder` events to Elasticsearch now, too, making them available to the powerful fulltext search capabilities.
 
 Set up a single Elasticsearch node
 (it'd be a complete cluster in production, but a single node is fine for the purposes of this lab)
@@ -667,6 +648,8 @@ And make its contents available as a config map:
 [source]
 ----
 $ oc create configmap es-config --from-file=elasticsearch.yml
+
+configmap/es-config created
 ----
 
 Finally, the config map contents can be exposed to the Elasticsearch container using a volume:
@@ -679,35 +662,29 @@ $ oc set volumes dc/elasticsearch --overwrite --add \
   --sub-path=elasticsearch.yml \
   --name=es-config \
   --configmap-name=es-config
+
+warning: volume "es-config" did not previously exist and was not overriden. A new volume with this name has been created instead.deploymentconfig.apps.openshift.io/elasticsearch volume updated
 ----
 
 This triggers a restart of the Elasticsearch node; once it's up again (use `oc get pods` to verify),
-it's time to register an instance of the Elasticsearch sink connector:
+it's time to register an instance of the Elasticsearch sink connector (change to the tooling pod for this):
 
 [source]
 ----
-$ oc exec -c kafka -i production-ready-kafka-0 -- curl -X POST -s -w "\n" \
-    -H "Accept:application/json" \
-    -H "Content-Type:application/json" \
-    http://debezium-connect-api:8083/connectors -d @- <<'EOF'
-{
-    "name": "elastic-sink",
-    "config": {
-        "connector.class": "io.confluent.connect.elasticsearch.ElasticsearchSinkConnector",
-        "tasks.max": "1",
-        "topics": "EventrOrder",
-        "connection.url": "http://elasticsearch:9200",
-        "key.ignore": "false",
-        "type.name": "order",
-        "behavior.on.null.values" : "delete",
-        "topic.index.map" : "EventrOrder:eventrorder",
-        "transforms": "unwrap,key",
-        "transforms.unwrap.type": "io.debezium.transforms.UnwrapFromEnvelope",
-        "transforms.key.type": "org.apache.kafka.connect.transforms.ExtractField$Key",
-        "transforms.key.field": "id"
-    }
-}
-EOF
+echo '{
+    "connector.class": "io.confluent.connect.elasticsearch.ElasticsearchSinkConnector",
+    "tasks.max": "1",
+    "topics": "EventrOrder",
+    "connection.url": "http://elasticsearch:9200",
+    "key.ignore": "false",
+    "type.name": "order",
+    "behavior.on.null.values" : "delete",
+    "topic.index.map" : "EventrOrder:eventrorder",
+    "transforms": "unwrap,key",
+    "transforms.unwrap.type": "io.debezium.transforms.UnwrapFromEnvelope",
+    "transforms.key.type": "org.apache.kafka.connect.transforms.ExtractField$Key",
+    "transforms.key.field": "id"
+}' | http PUT http://debezium-connect-api:8083/connectors/elastic-sink/config
 ----
 
 This listens to the `EventrOrder` topic and pushes corresponding index updates to Elasticsearch.
@@ -722,13 +699,14 @@ Get its URL by executing:
 [source]
 $ oc get routes elasticsearch -o=jsonpath='{.spec.host}{"\n"}'
 
+TODO: update format
 Open that URL in a browser, it should be in the form http://elasticsearch-voxxed.192.168.33.10.nip.io/.
 
 To browse the contents of the `eventrorder` index, go to http://elasticsearch-voxxed.192.168.33.10.nip.io/eventrorder/_search?pretty.
-Alternatively, you can use curl to do so:
+Alternatively, you can use http in the tooling pod to do so:
 
 [source]
-$ oc exec -i production-ready-kafka-0 -- curl -s -X GET "elasticsearch:9200/eventrorder/_search?pretty"
+$ http elasticsearch:9200/eventrorder/_search?pretty
 
 Again create or update a few orders in the event application and you'll see how the Elasticsearch index is updated based on that.
 
