@@ -37,21 +37,15 @@ Via Apache Kafka, these events will be propagated to any consumers asynchronousl
 The structure of the events (e.g. a JSON payload) is part of the order service's public API,
 so great take care should be taken when altering their format.
 
+==== Emitting Change Events With the Outbox Pattern
+
 In the following let's take a look how the outbox pattern can be implemented with Debezium.
 This image shows an overview of the overall design:
 
 TODO: update image
 image::local_view_materialization.png[Local View Materalization]
 
-Let's begin by setting up an instance of Postgres as the database for the order service.
-For this, we need a dedicated service account which will be used to run the database container
-(that's required due to the way the Postgres image handles file permissions internally):
-
-[source]
-$ oc create sa debezium -n amq-streams
-$ oc adm policy add-scc-to-user anyuid system:serviceaccount:amq-streams:debezium
-
-Then we can set up a new instance of Postgres:
+Let's begin by setting up an instance of Postgres as the database for the order service:
 
 [source]
 $ oc new-app --name=postgresql debezium/example-postgres:0.9 \
@@ -59,10 +53,14 @@ $ oc new-app --name=postgresql debezium/example-postgres:0.9 \
     -e POSTGRES_PASSWORD=postgrespw \
     -e POSTGRES_DB=orderdb
 
-And make it use the previously set up service account:
+As before, we must make it use the service account set up earlier on:
 
 [source]
+----
 $ oc patch dc/postgresql --type merge -p '{ "spec" : { "template" : { "spec" : { "serviceAccountName" : "debezium" } } } }'
+
+deploymentconfig.apps.openshift.io/postgresql patched
+----
 
 Once the database pod is up and running, we can deploy an instance of an example order service provided for this lab.
 It is a Java EE application running on WildFly.
@@ -70,7 +68,7 @@ OpenShift comes with s2i support for WildFly, too, so it's very easy to deploy t
 
 [source,sh]
 ----
-$ oc new-app --name=orderservice openshift/wildfly-160-centos7:latest~https://github.com/gunnarmorling/microservices-lab \
+$ oc new-app --name=orderservice openshift/wildfly-160-centos7:latest~https://github.com/debezium/microservices-lab \
     --context-dir=outbox/order-service \
     -e AB_PROMETHEUS_OFF=true \
     -e JAVA_OPTIONS=-Djava.net.preferIPv4Stack=true \
@@ -84,7 +82,7 @@ This uses the WildFly 16 s2i builder image to produce a deployment for a project
 It also sets up a datasource named "OrderDS" which makes the previously set up Postgres database available to the application.
 
 Now let's take a look at how the order service application creates the events in the outbox table.
-The relevant code lives in the OrderService class, with the `addOrder()` method looking like so:
+The relevant code lives in the https://github.com/debezium/microservices-lab/blob/master/outbox/order-service/src/main/java/io/debezium/examples/outbox/order/service/OrderService.java[OrderService] class, with the `addOrder()` method looking like so:
 
 [source,java]
 ----
@@ -103,7 +101,7 @@ This uses the JPA entity manager to persist a new purchase order;
 at the same time it creates two events derived from this order:
 one representing the creation of this purchase order and another one representing the creation of a corresponding invoice.
 These events are processed synchronously as part of the same transaction.
-They are handled by the EventSender class, which observes all event types derived from `ExportedEvent` and serializes them into the "outbox" table:
+They are handled by the https://github.com/debezium/microservices-lab/blob/master/outbox/order-service/src/main/java/io/debezium/examples/outbox/order/outbox/EventSender.java[EventSender] class, which observes all event types derived from `ExportedEvent` and serializes them into the "outbox" table:
 
 [source,java]
 ----
@@ -129,45 +127,41 @@ public class EventSender {
 
 The order service provides a REST API for placing purchase orders.
 So let's invoke this API to create an order and examine the corresponding database entries.
+Go to the tooling pod and run:
 
 [source]
 ----
-$ oc exec -c kafka -i production-ready-kafka-0 -- curl -X POST -s -w "\n" \
-    -H "Accept:application/json" \
-    -H "Content-Type:application/json" \
-    http://orderservice:8080/rest/orders -d @- <<'EOF'
-    {
-        "customerId" : "123",
-        "orderDate" : "2019-01-31T12:13:01",
-        "lineItems" : [
-            {
-                "item" : "Debezium in Action",
-                "quantity" : 2,
-                "totalPrice" : 39.98
-            },
-            {
-                "item" : "Debezium for Dummies",
-                "quantity" : 1,
-                "totalPrice" : 29.99
-            }
-        ]
-    }
-EOF
+$ echo '{
+    "customerId" : "123",
+    "orderDate" : "2019-01-31T12:13:01",
+    "lineItems" : [
+        {
+            "item" : "Debezium in Action",
+            "quantity" : 2,
+            "totalPrice" : 39.98
+        },
+        {
+            "item" : "Debezium for Dummies",
+            "quantity" : 1,
+            "totalPrice" : 29.99
+        }
+    ]
+}' | http POST http://orderservice:8080/rest/orders
 ----
 
-Once the order has been created, get a shell in the Postgres container:
+Once the order has been created, get a Postgres session:
 
 [source,sh]
 ----
-$ oc rsh $(oc get pods -o name -l app=postgresql)
+$ pgcli postgresql://postgresuser:postgrespw@postgresql:5432/orderdb
 ----
 
-Then use _psql_ to get all records from the `purchaseorder` and `outboxevent` tables:
+And get all records from the `purchaseorder` and `outboxevent` tables:
 
-[source,sh]
+[source,sql]
 ----
-psql -U postgresuser orderdb -c 'select * from "purchaseorder"'
-psql -U postgresuser orderdb -c 'select * from "outboxevent"'
+select * from public.purchaseorder;
+select * from public.outboxevent;
 ----
 
 The structure of the latter one is interesting in particular.
@@ -199,33 +193,28 @@ which ensures that consumers of that topic will consume all the events related t
 * `type`: the type of event, e.g. "Order Created" or "Order Line Canceled". Allows consumers to trigger suitable event handlers.
 * `payload`: a JSON structure with the actual event contents, e.g. containing a purchase order, information about the purchaser, contained order lines, their price etc.
 
-Now it's time to set up an instance of Debezium's Postgres connector for exporting the events from the outbox table to Apache Kafka:
+Now it's time to set up an instance of Debezium's Postgres connector for exporting the events from the outbox table to Apache Kafka.
+In the tooling pod, exit pgcli and run the following:
 
 [source,sh]
 ----
-$ oc exec -c kafka -i production-ready-kafka-0 -- curl -s -X PUT -w "\n" \
-    -H "Accept:application/json" \
-    -H "Content-Type:application/json" \
-    http://debezium-connect-api:8083/connectors/outbox-connector/config -d @- <<'EOF'
-
-    {
-        "connector.class": "io.debezium.connector.postgresql.PostgresConnector",
-        "tasks.max": "1",
-        "database.hostname": "postgresql",
-        "database.port": "5432",
-        "database.user": "postgresuser",
-        "database.password": "postgrespw",
-        "database.dbname" : "orderdb",
-        "database.server.name": "dbserver1",
-        "schema.whitelist": "public",
-        "table.whitelist" : "public.outboxevent",
-        "tombstones.on.delete" : "false",
-        "transforms" : "outbox",
-        "transforms.outbox.type" : "io.debezium.transforms.outbox.EventRouter",
-        "transforms.outbox.route.topic.replacement" : "${routedByValue}.events",
-        "transforms.outbox.table.field.event.timestamp" : "timestamp"
-    }
-EOF
+$ echo '{
+    "connector.class": "io.debezium.connector.postgresql.PostgresConnector",
+    "tasks.max": "1",
+    "database.hostname": "postgresql",
+    "database.port": "5432",
+    "database.user": "postgresuser",
+    "database.password": "postgrespw",
+    "database.dbname" : "orderdb",
+    "database.server.name": "dbserver1",
+    "schema.whitelist": "public",
+    "table.whitelist" : "public.outboxevent",
+    "tombstones.on.delete" : "false",
+    "transforms" : "outbox",
+    "transforms.outbox.type" : "io.debezium.transforms.outbox.EventRouter",
+    "transforms.outbox.route.topic.replacement" : "${routedByValue}.events",
+    "transforms.outbox.table.field.event.timestamp" : "timestamp"
+}' | http PUT http://debezium-connect-api:8083/connectors/outbox-connector/config
 ----
 
 Besides the configuration parts we've seen before (database host name, credentials, table whitelist etc.),
@@ -241,15 +230,87 @@ If needed, the SMT could be configured to make us of other column for these purp
 With the connector being deployed, we can take a look at the `order.events` topic:
 
 [source]
-oc exec -c zookeeper -it production-ready-zookeeper-0 -- /opt/kafka/bin/kafka-console-consumer.sh \
-   --bootstrap-server production-ready-kafka-bootstrap:9092 \
-   --from-beginning \
-   --property print.key=true \
-   --topic order.events
+$ kafkacat -b production-ready-kafka-bootstrap \
+    -t order.events \
+    -o beginning \
+    -f 'offset: %o, key: %k, value: %s\n'
 
 Note how the event payload is a string-ified JSON, i.e. the event structure is opaque to the schema of the message in Kafka.
 
-TODO: show event consumer
+==== Consuming Change Events
+
+As the outbox mechanism is working now, let's take a look at consuming these events from within another service.
+One challenge there is to handle duplicated messages:
+the change event pipeline guarantees "at least once" semantics, this means that events might be received a second time, e.g. if a consumer crashes before committing its last processed offset in a change event topic.
+Usually events shouldn't be processed a second time in this case,
+e.g. the shipment service shouldn't build another shipment for one and the same purchase order.
+Duplicated messages therefore must be detected and ignored.
+
+The event id discussed before comes in handy for that; it uniquely identifies each message and thus can be used to detect messages received more than once.
+It is propagated by Debezium's outbox event routing SMT as a header property.
+The https://github.com/debezium/microservices-lab/blob/master/outbox/shipment-service/src/main/java/io/debezium/examples/outbox/shipment/facade/OrderEventHandler.java[event handler] in the shipment service uses is like so to exclude and duplicated messages:
+
+[source,java]
+----
+@ApplicationScoped
+public class OrderEventHandler {
+
+    private static final Logger LOGGER = LoggerFactory.getLogger(OrderEventHandler.class);
+
+    @Inject
+    MessageLog log;
+
+    @Inject
+    ShipmentService shipmentService;
+
+    private final ObjectMapper objectMapper = new ObjectMapper();
+
+    @Transactional
+    public void onOrderEvent(UUID eventId, String key, JsonNode event, Long ts) throws IOException {
+        if (log.alreadyProcessed(eventId)) {
+            LOGGER.info("Event with UUID {} was already retrieved, ignoring it", eventId);
+            return;
+        }
+
+        final JsonNode payload = event.has("schema") ? event.get("payload") : event;
+
+        final String eventType = payload.get("eventType").asText();
+        final String eventPayload = payload.get("payload").asText();
+
+        final JsonNode payloadObject = objectMapper.readTree(eventPayload);
+
+        LOGGER.info("Received 'Order' event -- key: {}, event id: '{}', event type: '{}', ts: '{}'", key, eventId, eventType, ts);
+
+        if (eventType.equals("OrderCreated")) {
+            shipmentService.orderCreated(payloadObject);
+        }
+        else if (eventType.equals("OrderLineUpdated")) {
+            shipmentService.orderLineUpdated(payloadObject);
+        }
+        else {
+            LOGGER.warn("Unkown event type");
+        }
+
+        log.processed(eventId);
+    }
+}
+----
+
+This handler is invoked by a Kafka message consumer for each incoming message.
+It's again implemented using the MicroProfile Reactive Messaging API,
+you can find its source code https://github.com/debezium/microservices-lab/blob/master/outbox/shipment-service/src/main/java/io/debezium/examples/outbox/shipment/facade/KafkaEventConsumer.java[here].
+
+The event handler uses the https://github.com/debezium/microservices-lab/blob/master/outbox/shipment-service/src/main/java/io/debezium/examples/outbox/shipment/log/MessageLog.java[MessageLog] class to identify and ignore any duplicated messages.
+This one simply persists the id of each incoming event in a database table.
+If an event is processed for the first time (which should be the case in most of the times),
+the event handler dispatches the right business method based on the specific event type
+(order created or order line updated) and finally marks the message as processed in the log.
+This all happens within one transaction, so if something goes wrong at any time,
+the message wouldn't be marked as processed and if it is received from Kafka another time,
+it would again be processed.
+
+Let's deploy the shipment service now.
+It uses a MariaDB database:
 
 [source]
 $ oc new-app --name=shipmentdb mariadb/server \
@@ -257,6 +318,13 @@ $ oc new-app --name=shipmentdb mariadb/server \
     -e MARIADB_PASSWORD=mariadbpw \
     -e MARIADB_DATABASE=shipmentdb \
     -e MARIADB_RANDOM_ROOT_PASSWORD=true
+
+The shipment service is another Quarkus application and can be deployed like so:
+
+[source]
+$ oc new-app --name=order fabric8/s2i-java:latest~https://github.com/debezium/microservices-lab \
+    --context-dir=outbox/shipment-service \
+    -e AB_PROMETHEUS_OFF=true
 
 [source,sh]
 ----
@@ -268,6 +336,7 @@ To wrap up this section, remove the resources we've created:
 [source]
 $ oc delete all -l app=orderservice
 $ oc delete all -l app=postgresql
+$ oc delete all -l app=shipmentdb
 
 === Bonus: Processing Data Change Events with Kafka Streams
 
