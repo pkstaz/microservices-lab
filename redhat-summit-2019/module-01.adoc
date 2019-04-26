@@ -40,8 +40,11 @@ There should already be a project named "amq-streams" (verify by running `oc get
 In order to work within this project, run:
 
 [source, sh]
+----
 $ oc project amq-streams
+
 Now using project "amq-streams" on server "https://master00.example.com:443".
+----
 
 If the project doesn't exist yet, you can created it like so:
 

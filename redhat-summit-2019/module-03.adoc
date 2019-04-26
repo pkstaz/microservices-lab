@@ -81,8 +81,7 @@ The hostname of the exposed eventrapp service is available in the OpenShift cons
 [source]
 $ oc get routes eventrapp -o=jsonpath='{.spec.host}{"\n"}'
 
-TODO: use correct format
-Note the output, which should be in the format eventrapp-voxxed.192.168.33.10.nip.io and you can http://eventrapp-voxxed.192.168.33.10.nip.io[navigate there] using a browser.
+Note the output, which should be in the format eventrapp-amq-streams.apps-<YOUR GUID>.generic.opentlc.com and you can http://eventrapp-amq-streams.apps-<YOUR GUID>.generic.opentlc.com[navigate there] using a browser.
 Alternatively, you could click on the application's URL within the OpenShift web UI.
 
 You can use "Populate Data" to create some example data (Click on "Search orders" after that to see the created entries).
@@ -636,7 +635,7 @@ Create a configuration file for Elasticsearch:
 [source]
 ----
 $ cat > elasticsearch.yml << EOF
-cluster.name: docker-cluster123
+cluster.name: my-es-cluster
 network.host: 0.0.0.0
 discovery.zen.minimum_master_nodes: 1
 discovery.type: single-node
@@ -699,11 +698,10 @@ Get its URL by executing:
 [source]
 $ oc get routes elasticsearch -o=jsonpath='{.spec.host}{"\n"}'
 
-TODO: update format
-Open that URL in a browser, it should be in the form http://elasticsearch-voxxed.192.168.33.10.nip.io/.
+Open that URL in a browser, it should be in the form http://elasticsearch-amq-streams.apps-<YOUR GUID>.generic.opentlc.com.
 
-To browse the contents of the `eventrorder` index, go to http://elasticsearch-voxxed.192.168.33.10.nip.io/eventrorder/_search?pretty.
-Alternatively, you can use http in the tooling pod to do so:
+To browse the contents of the `eventrorder` index, go to http://elasticsearch-amq-streams.apps-<YOUR GUID>.generic.opentlc.com/eventrorder/_search?pretty.
+Alternatively, you can use httpie in the tooling pod to do so:
 
 [source]
 $ http elasticsearch:9200/eventrorder/_search?pretty
