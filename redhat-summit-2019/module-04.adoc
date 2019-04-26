@@ -364,9 +364,9 @@ In a separate application, the KStreams pipeline for aggregating the revenue val
 Let's begin by deploying a MySQL database which will hold the purchase orders:
 
 [source]
-$ oc new-app https://github.com/gunnarmorling/debezium-examples.git#kstreams-live-update-thorntail
-    --strategy=docker
-    --name=mysql
+$ oc new-app https://github.com/debezium/microservices-lab.git \
+    --strategy=docker \
+    --name=mysql \
     --context-dir=kstreams-live-update/example-db \
     -e MYSQL_ROOT_PASSWORD=debezium \
     -e MYSQL_USER=mysqluser \
@@ -375,7 +375,7 @@ $ oc new-app https://github.com/gunnarmorling/debezium-examples.git#kstreams-liv
 Next we deploy the event producer application:
 
 [source]
-$ oc new-app --name=event-source debezium/msa-lab-s2i:latest~https://github.com/gunnarmorling/debezium-examples.git#kstreams-live-update-thorntail \
+$ oc new-app --name=event-source debezium/msa-lab-s2i:latest~https://github.com/debezium/microservices-lab.git \
     --context-dir=kstreams-live-update/event-source \
     -e JAVA_MAIN_CLASS=io.debezium.examples.kstreams.liveupdate.eventsource.Main
 
@@ -401,27 +401,20 @@ Still in the tooling pod, run this command:
 
 [source,sh]
 ----
-cat <<'EOF' > register-mysql-source.json
-
-{
-    "name": "mysql-source",
-    "config": {
-        "connector.class": "io.debezium.connector.mysql.MySqlConnector",
-        "tasks.max": "1",
-        "database.hostname": "mysql",
-        "database.port": "3306",
-        "database.user": "debezium",
-        "database.password": "dbz",
-        "database.server.id": "184055",
-        "database.server.name": "dbserver1",
-        "decimal.handling.mode" : "string",
-        "table.whitelist": "inventory.orders,inventory.categories",
-        "database.history.kafka.bootstrap.servers": "production-ready-kafka-bootstrap:9092",
-        "database.history.kafka.topic": "schema-changes.inventory"
-    }
-}
-EOF
-cat register-mysql-source.json | http POST http://debezium-connect-api:8083/connectors/
+$ echo '{
+  "connector.class": "io.debezium.connector.mysql.MySqlConnector",
+  "tasks.max": "1",
+  "database.hostname": "mysql",
+  "database.port": "3306",
+  "database.user": "debezium",
+  "database.password": "dbz",
+  "database.server.id": "184055",
+  "database.server.name": "dbserver1",
+  "decimal.handling.mode" : "string",
+  "table.whitelist": "inventory.orders,inventory.categories",
+  "database.history.kafka.bootstrap.servers": "production-ready-kafka-bootstrap:9092",
+  "database.history.kafka.topic": "schema-changes.inventory"
+}' | http PUT http://debezium-connect-api:8083/connectors/mysql-source/config
 ----
 
 With the connector being deployed, we can examine the contents of the Kafka topics for product categories and purchase orders:
@@ -444,7 +437,7 @@ Run the following in the other shell session (i.e. not within the tooling pod):
 
 [source,sh]
 ----
-$ oc new-app --name=aggregator debezium/msa-lab-s2i:latest~https://github.com/gunnarmorling/debezium-examples.git#kstreams-live-update-thorntail \
+$ oc new-app --name=aggregator debezium/msa-lab-s2i:latest~https://github.com/debezium/microservices-lab.git \
     --context-dir=kstreams-live-update/aggregator \
     -e AB_PROMETHEUS_OFF=true \
     -e KAFKA_BOOTSTRAP_SERVERS=production-ready-kafka-bootstrap:9092 \
