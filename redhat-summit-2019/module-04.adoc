@@ -322,20 +322,28 @@ $ oc new-app --name=shipmentdb mariadb/server \
 The shipment service is another Quarkus application and can be deployed like so:
 
 [source]
-$ oc new-app --name=shipment fabric8/s2i-java:latest~https://github.com/debezium/microservices-lab \
+$ oc new-app --name=shipmentservice fabric8/s2i-java:latest~https://github.com/debezium/microservices-lab \
     --context-dir=outbox/shipment-service \
     -e AB_PROMETHEUS_OFF=true
 
+Once its running, change to the tooling pod and place a few more purchase orders by invoking the order service's REST API.
+Then, when taking a look into the shipment service's log, you should see that it receives the order events emitted via the outbox table:
+
 [source,sh]
 ----
-$ oc logs $(oc get pods -o name -l app=cdc-consumer-app)
+$ oc logs $(oc get pods -o name -l app=shipmentservice)
+
+2019-04-26 10:49:14,582 INFO  [io.deb.exa.out.shi.ser.ShipmentService] (vert.x-eventloop-thread-0) Processing 'OrderCreated' event: {"id":2,"lineItems":[{"id":3,"item":"Debezium in Action","status":"ENTERED","quantity":2,"totalPrice":39.98},{"id":4,"item":"Debezium for Dummies","status":"ENTERED","quantity":1,"totalPrice":29.99}],"orderDate":"2019-01-31T12:13:01","customerId":123}
 ----
+
+Hibernate ORM's log statements also indicate that the message is marked as processed in the log table and that a shipment corresponding to the received order is persisted.
 
 To wrap up this section, remove the resources we've created:
 
 [source]
 $ oc delete all -l app=orderservice
 $ oc delete all -l app=postgresql
+$ oc delete all -l app=shipmentservice
 $ oc delete all -l app=shipmentdb
 
 === Bonus: Processing Data Change Events with Kafka Streams
@@ -356,7 +364,10 @@ In a separate application, the KStreams pipeline for aggregating the revenue val
 Let's begin by deploying a MySQL database which will hold the purchase orders:
 
 [source]
-$ oc new-app https://github.com/gunnarmorling/debezium-examples.git#kstreams-live-update-thorntail --strategy=docker --name=mysql --context-dir=kstreams-live-update/example-db \
+$ oc new-app https://github.com/gunnarmorling/debezium-examples.git#kstreams-live-update-thorntail
+    --strategy=docker
+    --name=mysql
+    --context-dir=kstreams-live-update/example-db \
     -e MYSQL_ROOT_PASSWORD=debezium \
     -e MYSQL_USER=mysqluser \
     -e MYSQL_PASSWORD=mysqlpw
