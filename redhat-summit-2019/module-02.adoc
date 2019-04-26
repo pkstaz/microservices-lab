@@ -9,113 +9,113 @@ You'll learn the following things:
 * Receiving messages from Kafka
 
 We have prepared two simple microservices, one which receives "customer orders" via a REST API and another one which should get hold of any order in order to produce "invoices".
-The services are based on https://thorntail.io/[Thorntail], an approach for building microservices using Java EE and MicroProfile.
+The services are based on http://quarkus.io/[Quarkus], a "Kubernetes Native Java stack tailored for GraalVM & OpenJDK HotSpot, crafted from the best of breed Java libraries and standards".
 
-=== Preparing the Example Services
+=== The Order Service
 
-On your host machine, go to your checkout of the https://github.com/debezium/microservices-lab[microservices-lab] GitHub repository,
-fetch the latest contents from the upstream repo and check out a new branch "module2" based on the branch "upstream/module2-start".
-
-[source, sh]
-cd microservices-lab
-git fetch upstream
-git checkout -b module2 upstream/module2-start
-
-Import the two projects _ticket-msa/order_ and _ticket-msa/invoice_ into your preferred IDE.
-
-=== Setting Up the Producer Application
-
-The producer application receives orders for given events via a REST API.
-It already has been prepared to persist the orders in a MySQL database.
+The order service receives purchase orders (for event tickets) via a REST API.
+It persists these orders in a MySQL database.
 
 Now it should also emit a message for each placed order to Kafka.
-For doing so, we're going to use the https://github.com/aerogear/kafka-cdi[Kafka CDI] portable extension,
-which allows to obtain a message producer via dependency injection.
+For doing so, we're going to use the https://github.com/smallrye/smallrye-reactive-messaging[SmallRye Reactive Messaging API], which is an implementation of the https://github.com/eclipse/microprofile-reactive-messaging[MicroProfile Reactive Messaging API specification].
+In a nutshell, it is CDI extension to build data streaming applications based on top of Apache Kafka, MQTT, AMQP and others.
 Alternatively, the plain Kafka API could be used as well.
 
 Emitting messages to Kafka will allow other services, e.g. an invoicing service to react to each created order.
 
-In the following, update _ticket-msa/order/src/main/java/io/debezium/examples/ticketmsa/order/OrderService.java_ like so:
+Using this API, the following is all that it's needed for implementing the functionality described above in the https://github.com/debezium/microservices-lab/blob/master/ticket-msa/order/src/main/java/io/debezium/examples/ticketmsa/order/OrderService.java[OrderService] class:
 
-* Add the `@KafkaConfig` annotation to the class, which will inject the required Kafka configuration:
-
-    @KafkaConfig(bootstrapServers = "#{KAFKA_SERVICE_HOST}:#{KAFKA_SERVICE_PORT}")
-    public class OrderService {
-        ...
-    }
-
-* Add a field for injecting the topic name to send to; the https://github.com/eclipse/microprofile-config[Eclipse MicroProfile Config API] is used for this. This API helps to make applications configurable, e.g. via configuration files and environment variables. The property `order.topic.name` can now be configured via the environment variable `ORDER_TOPIC_NAME`:
+[source,java]
+----
+@Path("/orders")
+@ApplicationScoped
+public class OrderService {
 
     @Inject
-    @ConfigProperty(name="order.topic.name", defaultValue="orders")
-    private String topicName;
+    @Stream("orders")
+    private Emitter<KafkaMessage<Integer, String>> orderStream;
 
-* Add a field for injecting the Kafka producer:
+    @PersistenceContext
+    private EntityManager entityManager;
 
-    @Producer
-    private SimpleKafkaProducer<Integer, JsonObject> kafka;
-
-* Adjust the `addOrder()` method so it sends a message to Kafka:
-
+    @POST
+    @Transactional
+    @Produces("application/json")
+    @Consumes("application/json")
     public Order addOrder(Order order) {
         order = entityManager.merge(order);
-        kafka.send(topicName, order.getId(), order.toJson());
+        orderStream.send(KafkaMessage.of(order.getId(), order.toJson().toString()));
         return order;
     }
+}
+----
 
-Eventually, the class should look like https://github.com/debezium/microservices-lab/blob/master/ticket-msa/order/src/main/java/io/debezium/examples/ticketmsa/order/OrderService.java[this].
+This code:
 
-Commit your change and push it to your GitHub fork:
+* Provides a REST endpoint for placing new purchase orders via JAX-RS
+* Uses the Java Persistence API (JPA) to store the new orders in the MySQL database
+* Emits a Kafka message representing the new order
 
-[source, sh]
-$ git commit -a -m "Implementing order service"
-$ git push origin module2
+The `Emitter` instance `orderStream` is particularly interesting:
+it is provided by SmallRye and can be used to feed a stream from an imperative piece of code,
+such as our JAX-RS endpoint.
+The `@Stream` references a logical event stream named "orders",
+which is defined in the application.properties file:
 
-Now change to the VM where you have started OpenShift and start a MySQL instance by running:
+[source]
+----
+smallrye.messaging.sink.orders.type=io.smallrye.reactive.messaging.kafka.Kafka
+smallrye.messaging.sink.orders.topic=OrderEvents
+smallrye.messaging.sink.orders.bootstrap.servers=production-ready-kafka-bootstrap:9092
+smallrye.messaging.sink.orders.key.serializer=org.apache.kafka.common.serialization.IntegerSerializer
+smallrye.messaging.sink.orders.value.serializer=org.apache.kafka.common.serialization.StringSerializer
+----
 
-[source, sh]
-$ oc new-app --name=mysql debezium/example-mysql:0.9 \
-    -e MYSQL_ROOT_PASSWORD=debezium \
-    -e MYSQL_USER=mysqluser \
-    -e MYSQL_PASSWORD=mysqlpw
+This configuration defines that this stream should be bound to a Kafka topic named "OrderEvents",
+using the given Kafka bootstrap server (the entry point into the cluster which allows the client to identify all the nodes in the cluster) and the integer and string serializers for message key and value, respectively.
+
+Let's deploy the order service application now.
+Begin by setting up an instance of Postgres as the database for the service.
+For this, we need a dedicated service account which will be used to run the database container
+(that's required due to the way the Postgres image handles file permissions internally):
+
+Go to your SSH session where you've logged into OpenShift and run the following:
+
+[source]
+$ oc create sa debezium -n amq-streams
+$ oc adm policy add-scc-to-user anyuid system:serviceaccount:amq-streams:debezium
+
+Then we can set up a new instance of Postgres:
+
+[source,sh]
+----
+$ oc new-app --name=orderdb debezium/example-postgres:0.9 \
+    -e POSTGRES_USER=postgres \
+    -e POSTGRES_PASSWORD=postgres
+
+$ oc patch dc/orderdb --type merge -p '{ "spec" : { "template" : { "spec" : { "serviceAccountName" : "debezium" } } } }'
+----
 
 Then build and start the application.
 We're going to use https://docs.okd.io/latest/using_images/s2i_images/index.html[OpenShift's S2I] ("source to image") process for this.
-The S2I process will fetch the application's source code from the given GitHub location, build it using Maven and then run the uber JAR produced by the Thorntail Maven plug-in.
-
-We are using a special S2I builder image prepared for this workshop, which already contains all the Maven dependencies needed by the build.
-This avoids having to download all these dependencies from the Maven Central repository.
-This S2I image is based on the upstream https://github.com/fabric8/s2i-java[Fabric8 S2I] builder image,
+The S2I process will fetch the application's source code from the given GitHub location, build it using Maven and then run the application produced by the Quarkus Maven plug-in.
+We're using the https://github.com/fabric8/s2i-java[Fabric8 S2I] builder image,
 which can be used for building and running Java applications on OpenShift.
 
 [source,sh]
 ----
-$ oc new-app --name=order-msa debezium/msa-lab-s2i:latest~https://github.com/<your fork>/microservices-lab#module2 \
+$ oc new-app --name=order fabric8/s2i-java:latest~https://github.com/debezium/microservices-lab \
     --context-dir=ticket-msa/order \
-    -e MYSQL_DATABASE=inventory \
-    -e AB_PROMETHEUS_OFF=true \
-    -e KAFKA_SERVICE_HOST=production-ready-kafka-bootstrap \
-    -e KAFKA_SERVICE_PORT=9092 \
-    -e JAVA_OPTIONS=-Djava.net.preferIPv4Stack=true \
-    -e ORDER_TOPIC_NAME=myorders
+    -e AB_PROMETHEUS_OFF=true
 ----
 
-If you couldn't apply the code changes yourself, you can also use the completed version from the upstream repo at https://github.com/debezium/microservices-lab.
-
-Next we need to expose port 8080 for the service:
-
+We also must expose a "service" for the application, allowing it to receive HTTP requests
+Uti:
 [source,sh]
 ----
-$ oc patch service order-msa -p '{ "spec" : { "ports" : [{ "name" : "8080-tcp", "port" : 8080, "protocol" : "TCP", "targetPort" : 8080 }] } } }'
+$ oc expose svc order
 
-service/order-msa patched
-----
-
-[source,sh]
-----
-$ oc expose svc order-msa
-
-route.route.openshift.io/order-msa exposed
+route.route.openshift.io/order exposed
 ----
 
 Use `oc get pods` to verify that the build has completed and the application is running:
@@ -125,8 +125,8 @@ Use `oc get pods` to verify that the build has completed and the application is 
 $ oc get pods
 
 NAME                                          READY     STATUS      RESTARTS   AGE
-order-msa-1-build                             0/1       Completed   0          58s
-order-msa-1-hwdp8                             1/1       Running     0          5s
+order-1-build                             0/1       Completed   0          58s
+order-1-hwdp8                             1/1       Running     0          5s
 ...
 ----
 
@@ -134,7 +134,7 @@ You also can take a look at the logs of the build:
 
 [source,sh]
 ----
-$ oc logs order-msa-1-build
+$ oc logs order-1-build
 
 ...
 Pushed 30/31 layers, 97% complete
@@ -142,119 +142,112 @@ Pushed 31/31 layers, 100% complete
 Push successful
 ----
 
-After a while, the logs of the application itself should say that Thorntail has started:
+After a while, the logs of the application itself should say that Quarkus has started:
 
 [source,sh]
 ----
-$ oc logs $(oc get pods -o name -l app=order-msa)
+$ oc logs $(oc get pods -o name -l app=order)
 
 ...
-2018-10-26 09:03:12,532 INFO  [org.jboss.as.server] (main) WFLYSRV0010: Deployed "order.war" (runtime-name : "order.war")
-2018-10-26 09:03:12,548 INFO  [org.wildfly.swarm] (main) THORN99999: Thorntail is Ready
+2019-04-26 07:17:12,455 INFO  [io.quarkus] (main) Quarkus 0.13.3 started in 2.610s. Listening on: http://[::]:8080
+2019-04-26 07:17:12,455 INFO  [io.quarkus] (main) Installed features: [agroal, cdi, hibernate-orm, jdbc-postgresql, narayana-jta, resteasy, resteasy-jsonb, smallrye-reactive-messaging, smallrye-reactive-messaging-kafka, vertx]
 ----
 
-Alternatively, examine the "order-msa" application's status in the OpenShift web console.
+Alternatively, examine the "order" application's status in the OpenShift web console.
 
-Now you can place "orders" by submitting requests like this to the application's REST API:
+Now you can place "orders" by submitting requests like this to the application's REST API.
+For that, open a second shell session to the workstation node of the cluster
+and launch an instance of the tooling pod as done before in the previous module:
 
-[source]
+[source, sh]
+$ oc run tooling -it --image=debezium/tooling --restart=Never
+
+In the container submit the following request:
+
+[source,sh]
 ----
-$ oc exec -c kafka -i production-ready-kafka-0 -- curl -X POST -s -w "\n" \
-    -H "Accept:application/json" \
-    -H "Content-Type:application/json" \
-    http://order-msa:8080/rest/orders -d @- <<'EOF'
-{
-    "firstName":"John",
-    "lastName":"Doe",
-    "email":"john.doe@example.com",
-    "price":1000
-}
-EOF
+$ http POST http://order:8080/rest/orders \
+    firstName=John \
+    lastName=Doe \
+    email=john.doe@example.com \
+    price=1000
 ----
 
 The reply should contain the id generated for the order.
 We also can examine that it has been persisted in the database.
-To do so, open a shell on the database's pod and log into MySQL:
+To do so, launch pgcli (still within the tooling pod):
 
 [source,sh]
 ----
-$ oc rsh $(oc get pods -o name -l app=mysql)
-$ mysql -u $MYSQL_USER  -p$MYSQL_PASSWORD inventory
-# In the MySQL shell:
-# select * from MSA_ORDER;
+$ pgcli postgresql://postgres:postgres@orderdb:5432/postgres
+# In the PG shell:
+# select * from public.msa_order;
 # exit
-exit
 ----
 
 At the same time, a corresponding message should have been produced to Kafka.
-Let's take a look at the topic using the console consumer coming with Kafka:
+Let's take a look at the topic using kafkacat:
 
 [source,sh]
 ----
-$ oc exec -c zookeeper -it production-ready-zookeeper-0 -- /opt/kafka/bin/kafka-console-consumer.sh \
-   --bootstrap-server production-ready-kafka-bootstrap:9092 \
-   --from-beginning \
-   --property print.key=true \
-   --topic myorders
+$ kafkacat -b production-ready-kafka-bootstrap -t OrderEvents -o beginning -f 'offset: %o, key: %k, value: %s\n'
 ----
 
-Once done, hit Ctrl + C to exit the console consumer.
+Once done, hit Ctrl + C to exit kafkacat.
 
 === Setting Up the Consumer Application
 
-Once order messages arrive in the "myorders" topic, it's time to set up another service, invoice,
+Once order messages arrive in the "OrderEvents" topic, it's time to set up another service, invoice,
 which will receive the messages using Kafka's consumer API.
 
-Change to your local checkout again, and edit the file _ticket-msa/invoice/src/main/java/io/debezium/examples/ticketmsa/invoice/InvoiceService.java_:
+Again we're using the MicroProfile Reactive Messaging API, in this case for consuming messages from the "OrderEvents" topic.
+This is how the https://github.com/debezium/microservices-lab/blob/master/ticket-msa/invoice/src/main/java/io/debezium/examples/ticketmsa/invoice/InvoiceService.java[InvoiceService] class looks like:
 
-* Add the `@KafkaConfig` annotation to the class, which will inject the required Kafka configuration:
+[source,java]
+----
+@ApplicationScoped
+public class InvoiceService {
 
-    @KafkaConfig(bootstrapServers = "#{KAFKA_SERVICE_HOST}:#{KAFKA_SERVICE_PORT}")
-    public class InvoiceService {
-        ...
-    }
+    private static final Logger LOGGER = LoggerFactory.getLogger(InvoiceService.class);
 
-* Add an event handler method which will be invoked by the Kafka CDI extension for each message received on the "myorders" topic (the actual value is injected via an environment variable):
-
-    @Consumer(topics = "#{ORDER_TOPIC_NAME}", groupId = "InvoiceService")
+    @Incoming("orders")
     public void orderArrived(final String order) {
         LOGGER.info("Order event '{}' arrived", order);
     }
+}
+----
 
-Eventually, the file should look like https://github.com/debezium/microservices-lab/blob/master/ticket-msa/invoice/src/main/java/io/debezium/examples/ticketmsa/invoice/InvoiceService.java[this].
+This time the `@Incoming` method is used to mark a method which should be invoked whenever a new event arrives on the "orders" stream.
+As in the order service, this stream is configured in application.properties,
+only that it is a source instead of a sink stream this time:
 
-Commit the change and push it to your GitHub fork:
+[source]
+----
+smallrye.messaging.source.orders.type=io.smallrye.reactive.messaging.kafka.Kafka
+smallrye.messaging.source.orders.topic=OrderEvents
+smallrye.messaging.source.orders.bootstrap.servers=production-ready-kafka-bootstrap:9092
+smallrye.messaging.source.orders.key.deserializer=org.apache.kafka.common.serialization.IntegerDeserializer
+smallrye.messaging.source.orders.value.deserializer=org.apache.kafka.common.serialization.StringDeserializer
+smallrye.messaging.source.orders.group.id=InvoiceService
+----
 
-[source, sh]
-$ git commit -a -m "Implementing Kafka consumer"
-$ git push origin module2
-
-Switch to the console running OpenShift.
+Now switch to the console where you're running the `oc` commands.
 The "invoice" app can be run similar to the one above, only the "--context-dir" is different:
-The steps are the same as above, only that we're building the invoice application this time:
 
 [source,sh]
 ----
-$ oc new-app --name=invoice-msa debezium/msa-lab-s2i:latest~https://github.com/<your fork>/microservices-lab#module2 \
+$ oc new-app --name=invoice fabric8/s2i-java:latest~https://github.com/debezium/microservices-lab \
     --context-dir=ticket-msa/invoice \
-    -e AB_PROMETHEUS_OFF=true \
-    -e KAFKA_SERVICE_HOST=production-ready-kafka-bootstrap \
-    -e KAFKA_SERVICE_PORT=9092 \
-    -e JAVA_OPTIONS=-Djava.net.preferIPv4Stack=true \
-    -e ORDER_TOPIC_NAME=myorders
-
-$ oc patch service invoice-msa -p '{ "spec" : { "ports" : [{ "name" : "8080-tcp", "port" : 8080, "protocol" : "TCP", "targetPort" : 8080 }] } } }'
-
-$ oc expose svc invoice-msa
+    -e AB_PROMETHEUS_OFF=true
 ----
 
 Once the example application has started (verify similarly to the order service above), it will simply logs each order message it receives.
-Send another POST request to the order service as shown above.
+Go to the tooling pod and send another POST request to the order service as shown above.
 Then take a look at the logs of the invoice application:
 
 [source,sh]
 ----
-$ oc logs $(oc get pods -o name -l app=invoice-msa)
+$ oc logs $(oc get pods -o name -l app=invoice)
 ----
 
 You should see messages like this:
@@ -274,6 +267,6 @@ This is known as "change data capture".
 Once done with this part of the workshop, delete the two applications and the database like so:
 
 [source,sh]
-$ oc delete all -l app=invoice-msa
-$ oc delete all -l app=order-msa
-$ oc delete all -l app=mysql
+$ oc delete all -l app=invoice
+$ oc delete all -l app=order
+$ oc delete all -l app=orderdb
