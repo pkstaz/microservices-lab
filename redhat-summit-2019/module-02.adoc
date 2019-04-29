@@ -259,16 +259,16 @@ You should see messages like this:
 
 === Summary
 
+To wrap things up, delete the two applications and the database like so:
+
+[source,sh]
+$ oc delete all -l app=invoice
+$ oc delete all -l app=order
+$ oc delete all -l app=orderdb
+
 In this part of the lab you've learned how to propagate data between two microservices using Kafka.
 
 There's one potential problem, though: the "order" application writes data to its database _and_ Kafka at the same time.
 As these two resources are not modified within a single global transaction, it might happen that inconsistencies occur e.g. when the change is applied to the database but the write to Kafka failed for some reason.
 In <<module-03#,module 3>> we'll introduce an alternative approach which avoids these issues by tracking changes in the database in order to write them into Kafka.
 This is known as "change data capture".
-
-Once done with this part of the workshop, delete the two applications and the database like so:
-
-[source,sh]
-$ oc delete all -l app=invoice
-$ oc delete all -l app=order
-$ oc delete all -l app=orderdb
