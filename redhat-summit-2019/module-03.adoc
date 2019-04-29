@@ -602,7 +602,7 @@ select * from "EventrOrder";
 
 As you alter records in the source web application,
 you'll see how the table in PostgreSQL gets updated accordingly, if you re-execute the query.
-Note that `DELETE` operations currently cannot be propagated, as they are not yet supported by the JDBC sink connector.
+Note that `DELETE` operations currently cannot be propagated, as they are not yet supported by the Kafka Connect JDBC sink connector.
 Debezium provides a solution for that by allowing deletes to be rewritten into updates of a logical "deleted" field in emitted messages.
 This can then be used to delete all records in the sink database e.g. using a batch job.
 

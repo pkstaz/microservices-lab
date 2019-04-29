@@ -190,7 +190,7 @@ Let's take a look at the topic using kafkacat:
 
 [source,sh]
 ----
-$ kafkacat -b production-ready-kafka-bootstrap -t OrderEvents -o beginning -f 'offset: %o, key: %k, value: %s\n'
+$ kafkacat -C -b production-ready-kafka-bootstrap -t OrderEvents -o beginning -f 'offset: %o, key: %k, value: %s\n'
 ----
 
 Once done, hit Ctrl + C to exit kafkacat.
