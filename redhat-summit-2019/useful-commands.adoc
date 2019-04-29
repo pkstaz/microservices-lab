@@ -1,0 +1,28 @@
+== Useful Commands
+ifdef::env-github,env-browser[:outfilesuffix: .adoc]
+:imagesdir: ./images
+
+=== Testing the Deployment
+
+[source, sh]
+----
+$ oc run producer -it --image=debezium/tooling --restart=Never
+
+
+echo "mykey:test" | kafkacat -b production-ready-kafka-bootstrap -t test-topic -Z -K:
+echo "mykey:test2" | kafkacat -b production-ready-kafka-bootstrap -t test-topic -Z -K:
+----
+
+[source, sh]
+----
+$ oc run consumer -it --image=debezium/tooling --restart=Never
+
+kafkacat -b production-ready-kafka-bootstrap -t test-topic -o beginning -f 'offset: %o, key: %k, value: %s\n'
+----
+
+Listing all the available topics (to be run in main shell, not tooling pod):
+
+[source]
+----
+$ oc exec -it production-ready-kafka-0 -c kafka -- bin/kafka-topics.sh --zookeeper localhost:2181 --list
+----
