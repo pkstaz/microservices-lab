@@ -93,6 +93,8 @@ Now it's time to deploy Kafka Connect and Debezium.
 Kafka Connect is a platform for streaming data between Apache Kafka and other systems.
 It provides a framework and runtime environment for _source connectors_ (for getting data into Kafka)
 and _sink connectors_ (for getting data out of Kafka).
+Note it is a separate process from Apache Kafka itself, which can optionally be run in a clustered way, too.
+The Kafka Connect node(s) then will connect to the Apache Kafka cluster and put data into Kafka topics and get data out of them.
 Debezium provides a set of CDC source connectors for databases such as MySQL, PostgreSQL, SQL Server and MongoDB.
 
 Let's begin by setting up a Kafka Connect cluster,
