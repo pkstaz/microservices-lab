@@ -85,7 +85,7 @@ Go to your SSH session where you've logged into OpenShift and run the following:
 $ oc create sa debezium -n amq-streams
 $ oc adm policy add-scc-to-user anyuid system:serviceaccount:amq-streams:debezium
 
-Then we can set up a new instance of Postgres:
+Then we can set up a new instance of Postgres and make it use the new service account:
 
 [source,sh]
 ----
@@ -162,7 +162,7 @@ and launch an instance of the tooling pod as done before in the previous module:
 [source, sh]
 $ oc run tooling -it --image=debezium/tooling --restart=Never
 
-In the container submit the following request:
+In the container (make sure to see a `[root@tooling /]#` shell) submit the following request:
 
 [source,sh]
 ----
@@ -241,13 +241,26 @@ $ oc new-app --name=invoice fabric8/s2i-java:latest~https://github.com/debezium/
     -e AB_PROMETHEUS_OFF=true
 ----
 
-Once the example application has started (verify similarly to the order service above), it will simply logs each order message it receives.
+Again use `oc get pods` to verify that the build has completed and the application is running:
+
+[source,sh]
+----
+$ oc get pods
+
+NAME                                          READY     STATUS      RESTARTS   AGE
+invoice-1-build                             0/1       Completed   0          58s
+invoice-1-f7vza                             1/1       Running     0          5s
+...
+----
+
+Once the build as compleeted and the example application has started, it will simply logs each order message it receives.
+
 Go to the tooling pod and send another POST request to the order service as shown above.
 Then take a look at the logs of the invoice application:
 
 [source,sh]
 ----
-$ oc logs $(oc get pods -o name -l app=invoice)
+$ oc logs -f $(oc get pods -o name -l app=invoice)
 ----
 
 You should see messages like this:
@@ -256,6 +269,10 @@ You should see messages like this:
 ----
 2019-04-26 07:59:10,828 INFO  [io.deb.exa.tic.inv.InvoiceService] (vert.x-eventloop-thread-0) Order event '{"id":8,"firstName":"John","lastName":"Doe","email":"john.doe@example.com","price":1000}' arrived
 ----
+
+As you submit a few more orders to the order service in the tooling pod,
+all the corresponding order events will be logged in the console of the invoice service.
+Once done, hit Ctrl + C to stop tailing the invoice service's log.
 
 === Summary
 

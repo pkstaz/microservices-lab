@@ -4,6 +4,7 @@ ifdef::env-github,env-browser[:outfilesuffix: .adoc]
 
 Let's get started by deploying an Apache Kafka cluster on OpenShift.
 For this, we will use AMQ Streams, an open-source project that simplifies the process of deploying and managing Apache Kafka clusters on Kubernetes and OpenShift.
+AMQ Streams is a product commercially supported by Red HAT and is based on the upstream community https://strimzi.io/[Strimzi] project.
 
 === How AMQ Streams works
 
@@ -19,7 +20,7 @@ AMQ Streams simplifies these tasks by using a declarative approach to cluster an
 A Kubernetes Operator is an application-specific controller that extends the Kubernetes API to create, configure, and manage instances of complex stateful applications on behalf of a Kubernetes user.
 It builds upon the basic Kubernetes resource and operator concepts but includes domain or application-specific knowledge to automate common tasks.
 
-Instead of relying on direct deployment and management of ZooKeeper and Kafka clusters, Strimzi consists of a couple of these domain-specific operators that monitor the state of the cluster, making adjustments in accordance to a desired state read from dedicated configuration resources.
+Instead of relying on direct deployment and management of ZooKeeper and Kafka clusters, AMQ Streams consists of a couple of these domain-specific operators that monitor the state of the cluster, making adjustments in accordance to a desired state read from dedicated configuration resources.
 
 For creating an Apache Kafka cluster, for instance, you need to create a resource of type `kafka` that describes the properties of the cluster, and the *_cluster operator_* will deploy the cluster for you.
 If you need to change the state of the cluster, for example for changing properties or for adding new instances, all you have to do is to modify the resource and the changes will be rolled out accordingly.
@@ -241,7 +242,7 @@ strimzi-cluster-operator-696658566-9bttk            1/1       Running   0       
 
 In addition to the `cluster operator` created previously, notice a few more deployments:
 
-* the `entity operator` is now deployed as well - you can deploy it independently, but the Strimzi template deploys it out of the box; it is used to manage topics and/or users of Kafka
+* the `entity operator` is now deployed as well - you can deploy it independently, but the AMQ Streams template deploys it out of the box; it is used to manage topics and/or users of Kafka
 * one ZooKeeper node
 * three Kafka brokers
 
