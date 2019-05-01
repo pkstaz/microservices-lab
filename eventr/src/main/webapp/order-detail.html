@@ -15,7 +15,7 @@
 
   <!-- Payment -->
   <div class="form-group" ng-class="{ 'has-error' : orderForm.payment.$invalid && !orderForm.payment.$pristine }" valdr-form-group>
-    <label for="inputPayment" class="col-sm-2 control-label">Payment</label>
+    <label for="inputPayment" class="col-sm-2 control-label">Payment (numeric value)</label>
     <div class="col-sm-6">
       <input type="text" class="form-control" name="payment" id="inputPayment" placeholder="Payment" ng-model="order.payment" required>
      </div>
