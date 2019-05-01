@@ -18,7 +18,7 @@ These issues are avoided by using asynchronous communication.
 If the order service sends messages via a broker such as Apache Kafka,
 it is not impacted by any downtimes of the shipment service.
 As the order service will need to persist any incoming orders in its own local database, though,
-it cannot directly send messages to Apache Kafka, as that would get us back to the "dual write" issues discussed in the previous module.
+it cannot directly send messages to Apache Kafka, as that would get us back to the "dual write" issues discussed in module 2.
 Also the service would now be tied to the availability of Kafka itself.
 
 So what could an alternative be?
