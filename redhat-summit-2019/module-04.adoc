@@ -326,7 +326,48 @@ $ oc new-app --name=shipmentservice fabric8/s2i-java:latest~https://github.com/d
     --context-dir=outbox/shipment-service \
     -e AB_PROMETHEUS_OFF=true
 
-Once its running, change to the tooling pod and place a few more purchase orders by invoking the order service's REST API.
+Once its running, change to the tooling pod and place a few more purchase orders by invoking the order service's REST API:
+
+[source]
+----
+$ echo '{
+    "customerId" : "456",
+    "orderDate" : "2019-02-28T12:13:01",
+    "lineItems" : [
+        {
+            "item" : "Apache Kafka Tutorial",
+            "quantity" : 1,
+            "totalPrice" : 39.98
+        },
+        {
+            "item" : "Data streaming for Dummies",
+            "quantity" : 2,
+            "totalPrice" : 49.98
+        },
+        {
+            "item" : "Advanced CDC",
+            "quantity" : 1,
+            "totalPrice" : 59.98
+        }
+    ]
+}' | http POST http://orderservice:8080/rest/orders
+----
+
+[source]
+----
+$ echo '{
+    "customerId" : "789",
+    "orderDate" : "2019-03-20T12:13:01",
+    "lineItems" : [
+        {
+            "item" : "Apache Kafka Tutorial",
+            "quantity" : 1,
+            "totalPrice" : 39.98
+        }
+    ]
+}' | http POST http://orderservice:8080/rest/orders
+----
+
 Then, when taking a look into the shipment service's log, you should see that it receives the order events emitted via the outbox table:
 
 [source,sh]
