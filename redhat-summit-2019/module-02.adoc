@@ -82,8 +82,18 @@ For this, we need a dedicated service account which will be used to run the data
 Go to your SSH session where you've logged into OpenShift and run the following:
 
 [source]
+----
 $ oc create sa debezium -n amq-streams
+
+serviceaccount/debezium created
+----
+
+[source]
+----
 $ oc adm policy add-scc-to-user anyuid system:serviceaccount:amq-streams:debezium
+
+scc "anyuid" added to: ["system:serviceaccount:amq-streams:debezium"]
+----
 
 Then we can set up a new instance of Postgres and make it use the new service account:
 
@@ -109,8 +119,7 @@ $ oc new-app --name=order fabric8/s2i-java:latest~https://github.com/debezium/mi
     -e AB_PROMETHEUS_OFF=true
 ----
 
-We also must expose a "service" for the application, allowing it to receive HTTP requests
-Uti:
+We also must expose a "service" for the application, allowing it to receive HTTP requests:
 [source,sh]
 ----
 $ oc expose svc order
@@ -130,7 +139,8 @@ order-1-hwdp8                             1/1       Running     0          5s
 ...
 ----
 
-You also can take a look at the logs of the build:
+You also can take a look at the logs of the build
+(you also can run `oc logs -f order-1-build` to follow the logs):
 
 [source,sh]
 ----
@@ -142,7 +152,8 @@ Pushed 31/31 layers, 100% complete
 Push successful
 ----
 
-After a while, the logs of the application itself should say that Quarkus has started:
+After a while, the logs of the application itself should say that Quarkus has started
+(note the container may be in state "ContainerCreating" for a bit; retry again in this case):
 
 [source,sh]
 ----
@@ -256,7 +267,7 @@ invoice-1-f7vza                             1/1       Running     0          5s
 Once the build as compleeted and the example application has started, it will simply logs each order message it receives.
 
 Go to the tooling pod and send another POST request to the order service as shown above.
-Then take a look at the logs of the invoice application:
+Then take a look at the logs of the invoice application (in the shell where you ran the `oc` commands):
 
 [source,sh]
 ----

@@ -9,6 +9,8 @@ import javax.enterprise.context.ApplicationScoped;
 import javax.enterprise.event.Observes;
 import javax.persistence.EntityManager;
 import javax.persistence.PersistenceContext;
+import javax.transaction.Transactional;
+import javax.transaction.Transactional.TxType;
 
 @ApplicationScoped
 public class EventSender {
@@ -16,6 +18,7 @@ public class EventSender {
     @PersistenceContext
     private EntityManager entityManager;
 
+    @Transactional(TxType.MANDATORY)
     public void onExportedEvent(@Observes ExportedEvent event) {
         OutboxEvent outboxEvent = new OutboxEvent(
                 event.getAggregateType(),
