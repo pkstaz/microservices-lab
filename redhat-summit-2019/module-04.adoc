@@ -111,6 +111,7 @@ public class EventSender {
     @PersistenceContext
     private EntityManager entityManager;
 
+    @Transactional(TxType.MANDATORY)
     public void onExportedEvent(@Observes ExportedEvent event) {
         OutboxEvent outboxEvent = new OutboxEvent(
                 event.getAggregateType(),
@@ -124,6 +125,10 @@ public class EventSender {
     }
 }
 ----
+
+The `EventSender` simply persists a record representing the outbox event in table in the database.
+To make sure that this happens as part of the same transaction that updates the actual business tables,
+the transaction type `MANDATORY` is used (i.e. an exception would be raised, if no transaction is running yet).
 
 The order service provides a REST API for placing purchase orders.
 So let's invoke this API to create an order and examine the corresponding database entries.
