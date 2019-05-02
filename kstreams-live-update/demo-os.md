@@ -37,6 +37,12 @@ Verify connectors are deployed:
 http http://debezium-connect-api:8083/connector-plugins/
 ```
 
+If they are not deployed, run the S2I build again:
+
+```
+cd strimzi-0.8.0/plugins/ && oc start-build debezium-connect --from-dir=. --follow && cd ../..
+```
+
 # Demo (run in tooling pod)
 
 * Register the connector:
@@ -111,6 +117,15 @@ http elasticsearch:9200/orders/_search?pretty
 ```
 
 # Misc.
+
+Aggregator health check:
+
+```
+oc exec -c zookeeper my-cluster-zookeeper-0 -- curl -s -w "\n%{http_code}\n" -X GET \
+    -H "Accept:application/json" \
+    -H "Content-Type:application/json" \
+    http://aggregator:8080/health
+```
 
 Get connector status:
 

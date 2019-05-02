@@ -420,7 +420,7 @@ $ oc new-app https://github.com/debezium/microservices-lab.git \
 Next we deploy the event producer application:
 
 [source]
-$ oc new-app --name=event-source debezium/msa-lab-s2i:latest~https://github.com/debezium/microservices-lab.git \
+$ oc new-app --name=event-source fabric8/s2i-java:latest~https://github.com/debezium/microservices-lab.git \
     --context-dir=kstreams-live-update/event-source \
     -e JAVA_MAIN_CLASS=io.debezium.examples.kstreams.liveupdate.eventsource.Main
 
@@ -482,15 +482,10 @@ Run the following in the other shell session (i.e. not within the tooling pod):
 
 [source,sh]
 ----
-$ oc new-app --name=aggregator debezium/msa-lab-s2i:latest~https://github.com/debezium/microservices-lab.git \
+$ oc new-app --name=aggregator fabric8/s2i-java:latest~https://github.com/debezium/microservices-lab \
     --context-dir=kstreams-live-update/aggregator \
     -e AB_PROMETHEUS_OFF=true \
-    -e KAFKA_BOOTSTRAP_SERVERS=production-ready-kafka-bootstrap:9092 \
-    -e JAVA_OPTIONS=-Djava.net.preferIPv4Stack=true
-
-$ oc patch dc/aggregator -p '[{"op": "add", "path": "/spec/template/spec/containers/0/ports/1", "value":{"containerPort":8080,"protocol":"TCP"}}]' --type=json
-
-$ oc patch service aggregator -p '{ "spec" : { "ports" : [{ "name" : "8080-tcp", "port" : 8080, "protocol" : "TCP", "targetPort" : 8080 }] } } }'
+    -e KAFKA_BOOTSTRAP_SERVERS=production-ready-kafka-bootstrap:9092
 
 $ oc expose svc aggregator
 ----
