@@ -42,8 +42,7 @@ so great take care should be taken when altering their format.
 In the following let's take a look how the outbox pattern can be implemented with Debezium.
 This image shows an overview of the overall design:
 
-TODO: update image
-image::local_view_materialization.png[Local View Materalization]
+image::outbox_pattern.png[Outbox Pattern Overview,width=800]
 
 Let's begin by setting up an instance of Postgres as the database for the order service:
 
