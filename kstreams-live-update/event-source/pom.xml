@@ -14,8 +14,8 @@
         <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
         <java.version>1.8</java.version>
         <version.junit>4.12</version.junit>
-        <version.org.hibernate>5.3.3.Final</version.org.hibernate>
-        <version.org.slf4j>1.7.25</version.org.slf4j>
+        <version.org.hibernate>5.3.7.Final</version.org.hibernate>
+        <version.org.slf4j>1.7.34</version.org.slf4j>
     </properties>
 
     <dependencies>
